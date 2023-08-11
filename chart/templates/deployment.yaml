@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "cluster-api-janitor-openstack.fullname" . }}
+  labels: {{ include "cluster-api-janitor-openstack.labels" . | nindent 4 }}
+spec:
+  # Allow only one replica at once with the recreate strategy in order to avoid races
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: {{ include "cluster-api-janitor-openstack.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels: {{ include "cluster-api-janitor-openstack.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "cluster-api-janitor-openstack.fullname" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext: {{ toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: operator
+          securityContext: {{ toYaml .Values.securityContext | nindent 12 }}
+          image: {{ printf "%s:%s" .Values.image.repository (default .Chart.AppVersion .Values.image.tag) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          resources: {{ toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
