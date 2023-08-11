@@ -1,0 +1,14 @@
+apiVersion: v1
+entries:
+  cluster-api-janitor-openstack:
+  - apiVersion: v2
+    appVersion: 2b5ca31
+    created: "2023-08-11T17:11:37.734386426Z"
+    description: Helm chart for deploying cluster-api-janitor-openstack.
+    digest: 43014cfac6a198cbbc0c459598ab523eab022d5294d84b04db37ce4190e8235a
+    name: cluster-api-janitor-openstack
+    type: application
+    urls:
+    - cluster-api-janitor-openstack-0.1.0-dev.0.main.3.tgz
+    version: 0.1.0-dev.0.main.3
+generated: "2023-08-11T17:11:37.732688618Z"
