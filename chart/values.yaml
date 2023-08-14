@@ -1,3 +1,6 @@
+# The default volumes policy for the oeprator
+defaultVolumesPolicy: delete
+
 # The image to use for the operator
 image:
   repository: ghcr.io/stackhpc/cluster-api-janitor-openstack
