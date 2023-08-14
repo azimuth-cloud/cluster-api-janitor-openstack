@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import ssl
 import urllib.parse
 
 import httpx
@@ -189,5 +190,10 @@ class Cloud:
             config["auth"]["application_credential_id"],
             config["auth"]["application_credential_secret"]
         )
-        transport = httpx.AsyncHTTPTransport(verify = config.get("verify", True))
+        # Create a default context using the verification from the config
+        context = httpx.create_ssl_context(verify = config.get("verify", True))
+        # If a cacert was given, load it into the context
+        if cacert is not None:
+            context.load_verify_locations(cadata = cacert)
+        transport = httpx.AsyncHTTPTransport(verify = context)
         return cls(auth, transport, config.get("interface", "public"))
