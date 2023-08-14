@@ -50,8 +50,7 @@ to indicate whether volumes for that cluster should be kept or removed:
 apiVersion: infrastructure.cluster.x-k8s.io/v1alpha6
 kind: OpenStackCluster
 metadata:
-  name: {{ include "openstack-cluster.clusterName" . }}
-  labels: {{ include "openstack-cluster.labels" . | nindent 4 }}
+  name: my-cluster
   annotations:
     janitor.capi.stackhpc.com/volumes-policy: "keep|delete"
 ```
