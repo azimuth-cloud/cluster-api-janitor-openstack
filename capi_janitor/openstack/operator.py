@@ -19,9 +19,12 @@ ekclient = ekconfig.async_client()
 CAPO_VERSION = "infrastructure.cluster.x-k8s.io/v1alpha6"
 FINALIZER = "janitor.capi.stackhpc.com"
 
-VOLUMES_ANNOTATION = "janitor.capi.stackhpc.com/volumes"
-VOLUMES_ANNOTATION_KEEP = "keep"
-VOLUMES_ANNOTATION_DEFAULT = os.environ.get("CAPI_JANITOR_VOLUMES_ANNOTATION_DEFAULT", "remove")
+VOLUMES_ANNOTATION = "janitor.capi.stackhpc.com/volumes-policy"
+VOLUMES_ANNOTATION_DELETE = "delete"
+VOLUMES_ANNOTATION_DEFAULT = os.environ.get(
+    "CAPI_JANITOR_DEFAULT_VOLUMES_POLICY",
+    VOLUMES_ANNOTATION_DELETE
+)
 
 RETRY_ANNOTATION = "janitor.capi.stackhpc.com/retry"
 RETRY_MAX_BACKOFF = int(os.environ.get("CAPI_JANITOR_RETRY_MAX_BACKOFF", "60"))
@@ -169,9 +172,6 @@ async def on_openstackcluster_event(type, name, namespace, meta, spec, **kwargs)
     """
     Executes whenever an event occurs for an OpenStack cluster.
     """
-    print(type)
-    print(meta.get("finalizers"))
-    print(meta.get("annotations"))
     finalizers = meta.get("finalizers", [])
     # We add a custom finalizer to OpenStack cluster objects to
     # prevent them from being deleted until we have acted
@@ -201,7 +201,7 @@ async def on_openstackcluster_event(type, name, namespace, meta, spec, **kwargs)
         cacert = None
 
     # Use the credential to delete external resources as required
-    async with openstack.Cloud.from_clouds(clouds) as cloud:
+    async with openstack.Cloud.from_clouds(clouds, cacert = cacert) as cloud:
         # Release any floating IPs associated with loadbalancer services for the cluster
         networkapi = cloud.api_client("network", "/v2.0/")
         fips = networkapi.resource("floatingips")
@@ -230,7 +230,7 @@ async def on_openstackcluster_event(type, name, namespace, meta, spec, **kwargs)
             VOLUMES_ANNOTATION,
             VOLUMES_ANNOTATION_DEFAULT
         )
-        if volumes_annotation_value != VOLUMES_ANNOTATION_KEEP:
+        if volumes_annotation_value == VOLUMES_ANNOTATION_DELETE:
             check_volumes = True
             async for vol in volumes_for_cluster(volumes_detail, name):
                 if vol.status != "deleting":
