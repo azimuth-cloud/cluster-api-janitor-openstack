@@ -2,8 +2,18 @@ apiVersion: v1
 entries:
   cluster-api-janitor-openstack:
   - apiVersion: v2
+    appVersion: 7b7fdba
+    created: "2023-10-02T14:35:02.481097934Z"
+    description: Helm chart for deploying cluster-api-janitor-openstack.
+    digest: af69fb8de48545dedc80c3f054cced76af15b0cae77c1f3613e693984022bd5b
+    name: cluster-api-janitor-openstack
+    type: application
+    urls:
+    - cluster-api-janitor-openstack-0.1.1-dev.0.main.1.tgz
+    version: 0.1.1-dev.0.main.1
+  - apiVersion: v2
     appVersion: e2814c2
-    created: "2023-09-20T10:32:35.881360596Z"
+    created: "2023-10-02T14:35:02.480813129Z"
     description: Helm chart for deploying cluster-api-janitor-openstack.
     digest: b021778760895499c609681dbeac4c66a7e1ffa535322d3a7f27c59d955c0aad
     name: cluster-api-janitor-openstack
@@ -13,7 +23,7 @@ entries:
     version: 0.1.0
   - apiVersion: v2
     appVersion: e2814c2
-    created: "2023-09-20T10:32:35.881002089Z"
+    created: "2023-10-02T14:35:02.480530625Z"
     description: Helm chart for deploying cluster-api-janitor-openstack.
     digest: dc96515a1a3aea90f11b5cdd6f1c9b08f4158ec6a9535f1a8d10f7a9b77342c6
     name: cluster-api-janitor-openstack
@@ -23,7 +33,7 @@ entries:
     version: 0.1.0-dev.0.main.7
   - apiVersion: v2
     appVersion: 2b6e81a
-    created: "2023-09-20T10:32:35.880693384Z"
+    created: "2023-10-02T14:35:02.48022742Z"
     description: Helm chart for deploying cluster-api-janitor-openstack.
     digest: 94a767845ace58114932e58863e4f3a5ff3605ea5791217027e4bf28da1f873f
     name: cluster-api-janitor-openstack
@@ -33,7 +43,7 @@ entries:
     version: 0.1.0-dev.0.main.5
   - apiVersion: v2
     appVersion: 84dd1b6
-    created: "2023-09-20T10:32:35.880390278Z"
+    created: "2023-10-02T14:35:02.479926116Z"
     description: Helm chart for deploying cluster-api-janitor-openstack.
     digest: 03dda4f5834d2014b57a07a4cd1b9ce5327a3a138f3d0ef53c356cede11e3727
     name: cluster-api-janitor-openstack
@@ -43,7 +53,7 @@ entries:
     version: 0.1.0-dev.0.main.4
   - apiVersion: v2
     appVersion: 2b5ca31
-    created: "2023-09-20T10:32:35.880071772Z"
+    created: "2023-10-02T14:35:02.47959131Z"
     description: Helm chart for deploying cluster-api-janitor-openstack.
     digest: 43014cfac6a198cbbc0c459598ab523eab022d5294d84b04db37ce4190e8235a
     name: cluster-api-janitor-openstack
@@ -51,4 +61,4 @@ entries:
     urls:
     - cluster-api-janitor-openstack-0.1.0-dev.0.main.3.tgz
     version: 0.1.0-dev.0.main.3
-generated: "2023-09-20T10:32:35.879529361Z"
+generated: "2023-10-02T14:35:02.478993401Z"
