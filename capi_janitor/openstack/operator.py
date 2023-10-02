@@ -162,7 +162,7 @@ def retry_event(handler):
                     ],
                     namespace = kwargs["namespace"]
                 )
-        return result
+            return result
     return wrapper
 
 
