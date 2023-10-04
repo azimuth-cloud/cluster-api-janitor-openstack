@@ -47,7 +47,7 @@ Regardless of the operator default, individual `OpenStackCluster`s can also be a
 to indicate whether volumes for that cluster should be kept or removed:
 
 ```yaml
-apiVersion: infrastructure.cluster.x-k8s.io/v1alpha6
+apiVersion: infrastructure.cluster.x-k8s.io/v1alpha7
 kind: OpenStackCluster
 metadata:
   name: my-cluster

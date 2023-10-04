@@ -16,7 +16,7 @@ ekconfig = easykube.Configuration.from_environment()
 ekclient = ekconfig.async_client()
 
 
-CAPO_VERSION = "infrastructure.cluster.x-k8s.io/v1alpha6"
+CAPO_API_GROUP = "infrastructure.cluster.x-k8s.io"
 FINALIZER = "janitor.capi.stackhpc.com"
 
 VOLUMES_ANNOTATION = "janitor.capi.stackhpc.com/volumes-policy"
@@ -166,18 +166,21 @@ def retry_event(handler):
     return wrapper
 
 
-@kopf.on.event(CAPO_VERSION, "openstackclusters")
+@kopf.on.event(CAPO_API_GROUP, "openstackclusters")
 @retry_event
 async def on_openstackcluster_event(type, name, namespace, meta, spec, **kwargs):
     """
     Executes whenever an event occurs for an OpenStack cluster.
     """
+    # Get the resource for manipulating OpenStackClusters at the preferred version
+    capoapi = await ekclient.api_preferred_version(CAPO_API_GROUP)
+    openstackclusters = await capoapi.resource("openstackclusters")
+
     finalizers = meta.get("finalizers", [])
     # We add a custom finalizer to OpenStack cluster objects to
     # prevent them from being deleted until we have acted
     if not meta.get("deletionTimestamp"):
         if FINALIZER not in finalizers:
-            openstackclusters = await ekclient.api(CAPO_VERSION).resource("openstackclusters")
             await patch_finalizers(
                 openstackclusters,
                 name,
@@ -196,7 +199,7 @@ async def on_openstackcluster_event(type, name, namespace, meta, spec, **kwargs)
     clouds_secret = await secrets.fetch(spec["identityRef"]["name"], namespace = namespace)
     clouds = yaml.safe_load(base64.b64decode(clouds_secret.data["clouds.yaml"]))
     if "cacert" in clouds_secret.data:
-        cacert = base64.b64decode(clouds_secret.data["cacert"])
+        cacert = base64.b64decode(clouds_secret.data["cacert"]).decode()
     else:
         cacert = None
 
@@ -247,7 +250,6 @@ async def on_openstackcluster_event(type, name, namespace, meta, spec, **kwargs)
             raise ResourcesStillPresentError("volumes", name)
         
     # If we get to here, we can remove the finalizer
-    openstackclusters = await ekclient.api(CAPO_VERSION).resource("openstackclusters")
     await patch_finalizers(
         openstackclusters,
         name,
