@@ -90,7 +90,7 @@ async def empty(async_iterator):
         return True
     else:
         return False
-    
+
 
 async def patch_finalizers(resource, name, namespace, finalizers):
     """
@@ -136,32 +136,40 @@ def retry_event(handler):
             clamped_backoff = min(backoff, RETRY_MAX_BACKOFF)
             # Wait for the backoff before annotating the resource
             await asyncio.sleep(clamped_backoff)
-            await resource.patch(
-                kwargs["name"],
-                {
-                    "metadata": {
-                        "annotations": {
-                            RETRY_ANNOTATION: str(retries + 1),
+            try:
+                await resource.patch(
+                    kwargs["name"],
+                    {
+                        "metadata": {
+                            "annotations": {
+                                RETRY_ANNOTATION: str(retries + 1),
+                            }
                         }
-                    }
-                },
-                namespace = kwargs["namespace"]
-            )
+                    },
+                    namespace = kwargs["namespace"]
+                )
+            except easykube.ApiError as exc:
+                if exc.status_code != 404:
+                    raise
         else:
             if RETRY_ANNOTATION in kwargs["annotations"]:
                 # If the handler completes successfully, ensure the annotation is removed
                 # The forward slash in the annotation is designated by '~1' in JSON patch
                 annotation = RETRY_ANNOTATION.replace('/', '~1')
-                await resource.json_patch(
-                    kwargs["name"],
-                    [
-                        {
-                            "op": "remove",
-                            "path": f"/metadata/annotations/{annotation}",
-                        },
-                    ],
-                    namespace = kwargs["namespace"]
-                )
+                try:
+                    await resource.json_patch(
+                        kwargs["name"],
+                        [
+                            {
+                                "op": "remove",
+                                "path": f"/metadata/annotations/{annotation}",
+                            },
+                        ],
+                        namespace = kwargs["namespace"]
+                    )
+                except easykube.ApiError as exc:
+                    if exc.status_code != 404:
+                        raise
             return result
     return wrapper
 
