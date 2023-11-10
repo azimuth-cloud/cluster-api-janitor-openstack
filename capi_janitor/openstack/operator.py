@@ -106,7 +106,7 @@ async def patch_finalizers(resource, name, namespace, finalizers):
     except easykube.ApiError as exc:
         if exc.status_code != 404:
             raise
-    
+
 
 def retry_event(handler):
     """
@@ -176,13 +176,14 @@ def retry_event(handler):
 
 @kopf.on.event(CAPO_API_GROUP, "openstackclusters")
 @retry_event
-async def on_openstackcluster_event(type, name, namespace, meta, spec, **kwargs):
+async def on_openstackcluster_event(type, name, namespace, meta, labels, spec, **kwargs):
     """
     Executes whenever an event occurs for an OpenStack cluster.
     """
     # Get the resource for manipulating OpenStackClusters at the preferred version
     capoapi = await ekclient.api_preferred_version(CAPO_API_GROUP)
     openstackclusters = await capoapi.resource("openstackclusters")
+    clustername = labels.get("cluster.x-k8s.io/cluster-name")
 
     finalizers = meta.get("finalizers", [])
     # We add a custom finalizer to OpenStack cluster objects to
@@ -196,12 +197,12 @@ async def on_openstackcluster_event(type, name, namespace, meta, spec, **kwargs)
                 finalizers + [FINALIZER]
             )
         return
-    
+
     # If we are being deleted but the finalizer has already been removed,
     # then there is nothing to do
     if FINALIZER not in finalizers:
         return
-    
+
     # Get the cloud credential from the cluster
     secrets = await ekclient.api("v1").resource("secrets")
     clouds_secret = await secrets.fetch(spec["identityRef"]["name"], namespace = namespace)
@@ -217,7 +218,7 @@ async def on_openstackcluster_event(type, name, namespace, meta, spec, **kwargs)
         networkapi = cloud.api_client("network", "/v2.0/")
         fips = networkapi.resource("floatingips")
         check_fips = True
-        async for fip in fips_for_cluster(fips, name):
+        async for fip in fips_for_cluster(fips, clustername):
             await fips.delete(fip.id)
         else:
             check_fips = False
@@ -226,7 +227,7 @@ async def on_openstackcluster_event(type, name, namespace, meta, spec, **kwargs)
         lbapi = cloud.api_client("load-balancer", "/v2/lbaas/")
         loadbalancers = lbapi.resource("loadbalancers")
         check_lbs = True
-        async for lb in lbs_for_cluster(loadbalancers, name):
+        async for lb in lbs_for_cluster(loadbalancers, clustername):
             if lb.provisioning_status not in {"PENDING_DELETE", "DELETED"}:
                 await loadbalancers.delete(lb.id, cascade = "true")
         else:
@@ -243,20 +244,20 @@ async def on_openstackcluster_event(type, name, namespace, meta, spec, **kwargs)
         )
         if volumes_annotation_value == VOLUMES_ANNOTATION_DELETE:
             check_volumes = True
-            async for vol in volumes_for_cluster(volumes_detail, name):
+            async for vol in volumes_for_cluster(volumes_detail, clustername):
                 if vol.status != "deleting":
                     await volumes.delete(vol.id)
             else:
                 check_volumes = False
 
         # Check that the resources have actually been deleted
-        if check_fips and not await empty(fips_for_cluster(fips, name)):
-            raise ResourcesStillPresentError("floatingips", name)
-        if check_lbs and not await empty(lbs_for_cluster(loadbalancers, name)):
-            raise ResourcesStillPresentError("loadbalancers", name)
-        if check_volumes and not await empty(volumes_for_cluster(volumes_detail, name)):
-            raise ResourcesStillPresentError("volumes", name)
-        
+        if check_fips and not await empty(fips_for_cluster(fips, clustername)):
+            raise ResourcesStillPresentError("floatingips", clustername)
+        if check_lbs and not await empty(lbs_for_cluster(loadbalancers, clustername)):
+            raise ResourcesStillPresentError("loadbalancers", clustername)
+        if check_volumes and not await empty(volumes_for_cluster(volumes_detail, clustername)):
+            raise ResourcesStillPresentError("volumes", clustername)
+
     # If we get to here, we can remove the finalizer
     await patch_finalizers(
         openstackclusters,

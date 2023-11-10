@@ -72,12 +72,10 @@ the resources have been deleted, the finalizer is removed.
 
 > **WARNING**
 >
-> The cluster name of the OCCM and Cinder CSI **must** be set to the `metadata.name`
+> The cluster name of the OCCM and Cinder CSI **must** be set to the `metadata.labels.cluster.x-k8s.io/cluster-name`
 > of the `OpenStackCluster` resource.
 >
-> For instance, the `openstack-cluster` chart from the
-> [capi-helm-charts](https://github.com/stackhpc/capi-helm-charts) ensures that this happens
-> automatically.
+
 
 The advantage of this approach vs. a task that runs before the cluster deletion is started
 is that the external resource deletion happens _after_ all the machines have been deleted,
