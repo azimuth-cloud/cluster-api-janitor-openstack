@@ -37,7 +37,6 @@ RUN apt-get update && \
     apt-get install -y ca-certificates python3 tini && \
     rm -rf /var/lib/apt/lists/*
 
-COPY --from=helm /usr/bin/helm /usr/bin/helm
 COPY --from=python-builder /venv /venv
 
 USER $APP_UID
