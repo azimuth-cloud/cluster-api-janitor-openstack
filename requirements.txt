@@ -6,7 +6,7 @@ attrs==23.1.0
 certifi==2023.7.22
 charset-normalizer==3.2.0
 click==8.1.6
-easykube @ git+https://github.com/stackhpc/easykube.git@28208e4d07fab1eb74a21b05de102142fb1fc4ad
+easykube==0.1.1
 exceptiongroup==1.1.2
 frozenlist==1.4.0
 h11==0.14.0
