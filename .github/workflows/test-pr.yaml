@@ -1,0 +1,78 @@
+name: Integration tests
+
+on:
+  # We use pull_request_target so that dependabot-created workflows can run
+  pull_request_target:
+    types:
+      - opened
+      - synchronize
+      - ready_for_review
+      - reopened
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.head_ref }}
+  cancel-in-progress: true
+
+#####
+# The easiest way to set up a management cluster, make sure all the required images are
+# present and have an easy way to create Cluster API clusters using the janitor is to
+# leverage the existing Azimuth test infrastructure
+#
+# TODO(mkjpryor): Change this in the future to use the CAPI management only variation
+#####
+jobs:
+  # This job exists so that PRs from outside the main repo are rejected
+  fail_on_remote:
+    runs-on: ubuntu-latest
+    steps:
+      - name: PR must be from a branch in the stackhpc/cluster-api-janitor-openstack repo
+        run: exit ${{ github.event.pull_request.head.repo.full_name == 'stackhpc/cluster-api-janitor-openstack' && '0' || '1' }}
+
+  # Use a job that does nothing but is protected by an environment as a guard
+  # This allows us to control when the jobs that consume infrastructure run
+  wait_for_approval:
+    needs: [fail_on_remote]
+    runs-on: ubuntu-latest
+    environment: ci-approval
+    steps:
+      - run: exit 0
+
+  publish_artifacts:
+    needs: [wait_for_approval]
+    uses: ./.github/workflows/build-push-artifacts.yaml
+    with:
+      ref: ${{ github.event.pull_request.head.sha }}
+    secrets: inherit
+
+  run_azimuth_tests:
+    needs: [publish_artifacts]
+    runs-on: ubuntu-latest
+    steps:
+      # Check out the configuration repository
+      - name: Set up Azimuth environment
+        uses: stackhpc/azimuth-config/.github/actions/setup@main
+        with:
+          os-clouds: ${{ secrets.OS_CLOUDS }}
+          environment-prefix: janitor-ci
+          # Use the version of the chart that we just built
+          # We also don't need all the tests
+          # The Kubernetes test is sufficient to confirm the janitor is working
+          extra-vars: |
+            clusterapi_janitor_openstack_chart_version: ${{ needs.publish_artifacts.outputs.chart-version }}
+            generate_tests_caas_suite_enabled: false
+            generate_tests_kubernetes_apps_suite_enabled: false
+
+      # Provision Azimuth using the azimuth-ops version under test
+      - name: Provision Azimuth
+        uses: stackhpc/azimuth-config/.github/actions/provision@main
+
+      # # Run the tests
+      - name: Run Azimuth tests
+        uses: stackhpc/azimuth-config/.github/actions/test@main
+
+      # Tear down the environment
+      - name: Destroy Azimuth
+        uses: stackhpc/azimuth-config/.github/actions/destroy@main
+        if: ${{ always() }}
