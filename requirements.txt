@@ -11,7 +11,7 @@ exceptiongroup==1.1.2
 frozenlist==1.4.0
 h11==0.14.0
 httpcore==0.17.3
-httpx==0.24.1
+httpx==0.25.1
 idna==3.4
 iso8601==2.0.0
 kopf==1.36.2
