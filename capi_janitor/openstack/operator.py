@@ -265,7 +265,8 @@ async def on_openstackcluster_event(type, name, namespace, meta, spec, **kwargs)
                         # HTTP 400 from Cinder API indicates that we're trying to
                         # delete a snapshot which is not in the 'available'.
                         # We catch this here and simply retry later after we have
-                        # attempted another iteration of cleaning up snapshots.
+                        # attempted another iteration of cleaning up volumes and
+                        # snapshots.
                         if exc.response.status_code == 400:
                             print(f"Recieved HTTP 400 for snapshot {snapshot.id} - will retry delete.")
                         else:
@@ -282,7 +283,7 @@ async def on_openstackcluster_event(type, name, namespace, meta, spec, **kwargs)
                         # delete a volume which is not in the 'available' state or
                         # which still has snapshots associated. We catch this here
                         # and simply retry later after we have attempted another
-                        # iteration of cleaning up snapshots.
+                        # iteration of cleaning up volumes and snapshots.
                         if exc.response.status_code == 400:
                             print(f"Recieved HTTP 400 for volume {vol.id} - will retry delete.")
                         else:
