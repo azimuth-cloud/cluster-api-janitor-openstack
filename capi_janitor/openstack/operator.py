@@ -8,6 +8,7 @@ import kopf
 import yaml
 
 import easykube
+import httpx
 
 from . import openstack
 
@@ -78,6 +79,16 @@ async def volumes_for_cluster(resource, cluster):
         owner = vol.metadata.get("cinder.csi.openstack.org/cluster")
         if owner and owner == cluster:
             yield vol
+
+async def snapshots_for_cluster(resource, cluster):
+    """
+    Async iterator for snapshots belonging to the specified cluster.
+    """
+    async for snapshot in resource.list():
+        # CSI Cinder sets metadata on the volumes that we can look for
+        owner = snapshot.metadata.get("cinder.csi.openstack.org/cluster")
+        if owner and owner == cluster:
+            yield snapshot
 
 
 async def empty(async_iterator):
@@ -232,10 +243,12 @@ async def on_openstackcluster_event(type, name, namespace, meta, spec, **kwargs)
         else:
             check_lbs = False
 
-        # Delete volumes associated with PVCs, unless requested otherwise via the annotation
+        # Delete volumes and snapshots associated with PVCs, unless requested otherwise via the annotation
         volumeapi = cloud.api_client("volumev3")
         volumes_detail = volumeapi.resource("volumes/detail")
         volumes = volumeapi.resource("volumes")
+        snapshots_detail = volumeapi.resource("snapshots/detail")
+        snapshots = volumeapi.resource("snapshots")
         check_volumes = False
         volumes_annotation_value = meta.get("annotations", {}).get(
             VOLUMES_ANNOTATION,
@@ -243,9 +256,23 @@ async def on_openstackcluster_event(type, name, namespace, meta, spec, **kwargs)
         )
         if volumes_annotation_value == VOLUMES_ANNOTATION_DELETE:
             check_volumes = True
+            async for snapshot in snapshots_for_cluster(snapshots_detail, name):
+                if snapshot.status != "deleting":
+                    await snapshots.delete(snapshot.id)
             async for vol in volumes_for_cluster(volumes_detail, name):
                 if vol.status != "deleting":
-                    await volumes.delete(vol.id)
+                    try:
+                        await volumes.delete(vol.id)
+                    except httpx.HTTPStatusError as exc:
+                        # HTTP 400 from Cinder API indicates that we're trying to
+                        # delete a volume which is not in the 'available' state or
+                        # which still has snapshots associated. We catch this here
+                        # and simply retry later after we have attempted another
+                        # iteration of cleaning up snapshots.
+                        if exc.response.status_code == 400:
+                            print(f"Recieved HTTP 400 for volume {vol.id} - will retry delete.")
+                        else:
+                            raise
             else:
                 check_volumes = False
 
@@ -256,6 +283,8 @@ async def on_openstackcluster_event(type, name, namespace, meta, spec, **kwargs)
             raise ResourcesStillPresentError("loadbalancers", name)
         if check_volumes and not await empty(volumes_for_cluster(volumes_detail, name)):
             raise ResourcesStillPresentError("volumes", name)
+        if check_volumes and not await empty(snapshots_for_cluster(snapshots_detail, name)):
+            raise ResourcesStillPresentError("snapshots", name)
         
     # If we get to here, we can remove the finalizer
     await patch_finalizers(
