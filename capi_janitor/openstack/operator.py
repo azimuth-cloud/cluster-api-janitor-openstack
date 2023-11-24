@@ -247,18 +247,32 @@ async def on_openstackcluster_event(type, name, namespace, meta, spec, **kwargs)
         volumeapi = cloud.api_client("volumev3")
         volumes_detail = volumeapi.resource("volumes/detail")
         volumes = volumeapi.resource("volumes")
+        check_volumes = False
         snapshots_detail = volumeapi.resource("snapshots/detail")
         snapshots = volumeapi.resource("snapshots")
-        check_volumes = False
+        check_snapshots = False
         volumes_annotation_value = meta.get("annotations", {}).get(
             VOLUMES_ANNOTATION,
             VOLUMES_ANNOTATION_DEFAULT
         )
         if volumes_annotation_value == VOLUMES_ANNOTATION_DELETE:
-            check_volumes = True
+            check_volumes, check_snapshots = True, True
             async for snapshot in snapshots_for_cluster(snapshots_detail, name):
                 if snapshot.status != "deleting":
-                    await snapshots.delete(snapshot.id)
+                    try:
+                        await snapshots.delete(snapshot.id)
+                    except httpx.HTTPStatusError as exc:
+                        # HTTP 400 from Cinder API indicates that we're trying to
+                        # delete a snapshot which is not in the 'available'.
+                        # We catch this here and simply retry later after we have
+                        # attempted another iteration of cleaning up snapshots.
+                        if exc.response.status_code == 400:
+                            print(f"Recieved HTTP 400 for snapshot {snapshot.id} - will retry delete.")
+                        else:
+                            raise
+            else:
+                check_snapshots = False
+                    
             async for vol in volumes_for_cluster(volumes_detail, name):
                 if vol.status != "deleting":
                     try:
@@ -283,7 +297,7 @@ async def on_openstackcluster_event(type, name, namespace, meta, spec, **kwargs)
             raise ResourcesStillPresentError("loadbalancers", name)
         if check_volumes and not await empty(volumes_for_cluster(volumes_detail, name)):
             raise ResourcesStillPresentError("volumes", name)
-        if check_volumes and not await empty(snapshots_for_cluster(snapshots_detail, name)):
+        if check_snapshots and not await empty(snapshots_for_cluster(snapshots_detail, name)):
             raise ResourcesStillPresentError("snapshots", name)
         
     # If we get to here, we can remove the finalizer
