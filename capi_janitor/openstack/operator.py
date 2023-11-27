@@ -27,7 +27,10 @@ VOLUMES_ANNOTATION_DEFAULT = os.environ.get(
     VOLUMES_ANNOTATION_DELETE
 )
 
-RETRY_ANNOTATION = "janitor.capi.stackhpc.com/retry"
+CREDENTIAL_ANNOTATION = "janitor.capi.stackhpc.com/credential-policy"
+CREDENTIAL_ANNOTATION_DELETE = "delete"
+
+RETRY_ANNOTATION = "janitor.capi.stackhpc.com/retries"
 RETRY_MAX_BACKOFF = int(os.environ.get("CAPI_JANITOR_RETRY_MAX_BACKOFF", "60"))
 
 
@@ -80,6 +83,7 @@ async def volumes_for_cluster(resource, cluster):
         if owner and owner == cluster:
             yield vol
 
+
 async def snapshots_for_cluster(resource, cluster):
     """
     Async iterator for snapshots belonging to the specified cluster.
@@ -103,6 +107,113 @@ async def empty(async_iterator):
         return False
 
 
+async def try_delete(logger, resource, instances):
+    """
+    Tries to delete the specified instances, catching 400 and 409 exceptions for retry.
+
+    It returns a boolean indicating whether a check is required for the resource.
+    """
+    check_required = True
+    async for instance in instances:
+        try:
+            await resource.delete(instance.id)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in {400, 409}:
+                logger.warn(
+                    f"got status code {exc.response.status_code} when attempting to delete "
+                    f"{resource.singular_name} with ID {id} - will retry"
+                )
+            else:
+                raise
+    else:
+        check_required = False
+    return check_required
+
+
+async def purge_openstack_resources(
+    logger,
+    clouds,
+    cacert,
+    name,
+    include_volumes,
+    include_appcred
+):
+    """
+    Cleans up the OpenStack resources created by the OCCM and CSI for a cluster.
+    """
+    # Use the credential to delete external resources as required
+    async with openstack.Cloud.from_clouds(clouds, cacert = cacert) as cloud:
+        # If the session is not authenticated, there is nothing we can do
+        if not cloud.is_authenticated:
+            logger.warn("application credential has been deleted")
+            return
+
+        # Release any floating IPs associated with loadbalancer services for the cluster
+        networkapi = cloud.api_client("network", "/v2.0/")
+        fips = networkapi.resource("floatingips")
+        check_fips = await try_delete(logger, fips, fips_for_cluster(fips, name))
+        logger.info("deleted floating IPs for LoadBalancer services")
+
+        # Delete any loadbalancers associated with loadbalancer services for the cluster
+        lbapi = cloud.api_client("load-balancer", "/v2/lbaas/")
+        loadbalancers = lbapi.resource("loadbalancers")
+        check_lbs = await try_delete(logger, loadbalancers, lbs_for_cluster(loadbalancers, name))
+        logger.info("deleted load balancers for LoadBalancer services")
+
+        # Delete volumes and snapshots associated with PVCs, unless requested
+        # otherwise via the annotation
+        volumeapi = cloud.api_client("volumev3")
+        snapshots_detail = volumeapi.resource("snapshots/detail")
+        snapshots = volumeapi.resource("snapshots")
+        check_snapshots = False
+        volumes_detail = volumeapi.resource("volumes/detail")
+        volumes = volumeapi.resource("volumes")
+        check_volumes = False
+        if include_volumes:
+            check_snapshots = await try_delete(
+                logger,
+                snapshots,
+                snapshots_for_cluster(snapshots_detail, name)
+            )
+            logger.info("deleted snapshots for persistent volume claims")
+            check_volumes = await try_delete(
+                logger,
+                volumes,
+                volumes_for_cluster(volumes_detail, name)
+            )
+            logger.info("deleted volumes for persistent volume claims")
+
+        # Check that the resources have actually been deleted
+        if check_fips and not await empty(fips_for_cluster(fips, name)):
+            raise ResourcesStillPresentError("floatingips", name)
+        if check_lbs and not await empty(lbs_for_cluster(loadbalancers, name)):
+            raise ResourcesStillPresentError("loadbalancers", name)
+        if check_volumes and not await empty(volumes_for_cluster(volumes_detail, name)):
+            raise ResourcesStillPresentError("volumes", name)
+        if check_snapshots and not await empty(snapshots_for_cluster(snapshots_detail, name)):
+            raise ResourcesStillPresentError("snapshots", name)
+
+        # Now we have finished deleting resources, try to delete the appcred itself
+        # This requires an appcred to be unrestricted
+        # If it is not, we proceed but emit a warning
+        if include_appcred:
+            identityapi = cloud.api_client("identity", "v3")
+            appcreds = identityapi.resource(
+                "application_credentials",
+                # appcreds are user-namespaced
+                prefix = f"users/{cloud.current_user_id}"
+            )
+            appcred_id = clouds["clouds"]["openstack"]["auth"]["application_credential_id"]
+            try:
+                await appcreds.delete(appcred_id)
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 403:
+                    logger.warn("unable to delete application credential for cluster")
+                else:
+                    raise
+            logger.info("deleted application credential for cluster")
+
+
 async def patch_finalizers(resource, name, namespace, finalizers):
     """
     Patches the finalizers of a resource. If the resource does not exist any
@@ -115,18 +226,21 @@ async def patch_finalizers(resource, name, namespace, finalizers):
             namespace = namespace
         )
     except easykube.ApiError as exc:
-        if exc.status_code != 404:
+        # Patching the finalizers can result in a 422 if we are deleting and CAPO
+        # has removed its finalizer while we were working
+        if exc.status_code == 422:
+            raise kopf.TemporaryError("error patching finalizers", delay = 1)
+        elif exc.status_code != 404:
             raise
-    
+
 
 def retry_event(handler):
     """
     Decorator for retrying events on Kubernetes objects.
 
-    Objects are annotated with the number of times the handler has been retried
-    since it was last successful, which is used to calculate an exponential backoff.
-
-    Doing it this way ensures that the handler sees the most recent data each time.
+    Instead of retrying within the handler, potentially on stale data, the object is
+    annotated with the number of times it has been retried. This triggers a new event
+    for the retry which contains up-to-date data.
 
     As recommended in the kopf docs, handlers should be idempotent as this mechanism
     may result in the handler being called twice if an update happens between a failure
@@ -139,14 +253,17 @@ def retry_event(handler):
         try:
             result = await handler(**kwargs)
         except Exception as exc:
-            kwargs["logger"].exception(str(exc))
             # Check to see how many times a handler has been retried
             retries = int(kwargs["annotations"].get(RETRY_ANNOTATION, "0"))
-            # Calculate the backoff
-            backoff = 2**retries + random.uniform(0, 1)
-            clamped_backoff = min(backoff, RETRY_MAX_BACKOFF)
+            if isinstance(exc, kopf.TemporaryError):
+                kwargs["logger"].warn(str(exc))
+                backoff = exc.delay
+            else:
+                kwargs["logger"].exception(str(exc))
+                # Calculate the backoff
+                backoff = min(2**retries + random.uniform(0, 1), RETRY_MAX_BACKOFF)
             # Wait for the backoff before annotating the resource
-            await asyncio.sleep(clamped_backoff)
+            await asyncio.sleep(backoff)
             try:
                 await resource.patch(
                     kwargs["name"],
@@ -183,11 +300,11 @@ def retry_event(handler):
                         raise
             return result
     return wrapper
-
+    
 
 @kopf.on.event(CAPO_API_GROUP, "openstackclusters")
 @retry_event
-async def on_openstackcluster_event(type, name, namespace, meta, spec, **kwargs):
+async def on_openstackcluster_event(name, namespace, meta, spec, logger, **kwargs):
     """
     Executes whenever an event occurs for an OpenStack cluster.
     """
@@ -206,6 +323,7 @@ async def on_openstackcluster_event(type, name, namespace, meta, spec, **kwargs)
                 namespace,
                 finalizers + [FINALIZER]
             )
+            logger.info("added janitor finalizer to cluster")
         return
     
     # If we are being deleted but the finalizer has already been removed,
@@ -213,94 +331,45 @@ async def on_openstackcluster_event(type, name, namespace, meta, spec, **kwargs)
     if FINALIZER not in finalizers:
         return
     
-    # Get the cloud credential from the cluster
+    # Get the cloud credential from the cluster and use it to delete dangling
+    # resources created by OpenStack integrations on the cluster
     secrets = await ekclient.api("v1").resource("secrets")
-    clouds_secret = await secrets.fetch(spec["identityRef"]["name"], namespace = namespace)
-    clouds = yaml.safe_load(base64.b64decode(clouds_secret.data["clouds.yaml"]))
-    if "cacert" in clouds_secret.data:
-        cacert = base64.b64decode(clouds_secret.data["cacert"]).decode()
+    try:
+        clouds_secret = await secrets.fetch(spec["identityRef"]["name"], namespace = namespace)
+    except easykube.ApiError as exc:
+        if exc.status_code != 404:
+            raise
     else:
-        cacert = None
-
-    # Use the credential to delete external resources as required
-    async with openstack.Cloud.from_clouds(clouds, cacert = cacert) as cloud:
-        # Release any floating IPs associated with loadbalancer services for the cluster
-        networkapi = cloud.api_client("network", "/v2.0/")
-        fips = networkapi.resource("floatingips")
-        check_fips = True
-        async for fip in fips_for_cluster(fips, name):
-            await fips.delete(fip.id)
+        clouds = yaml.safe_load(base64.b64decode(clouds_secret.data["clouds.yaml"]))
+        if "cacert" in clouds_secret.data:
+            cacert = base64.b64decode(clouds_secret.data["cacert"]).decode()
         else:
-            check_fips = False
-
-        # Delete any loadbalancers associated with loadbalancer services for the cluster
-        lbapi = cloud.api_client("load-balancer", "/v2/lbaas/")
-        loadbalancers = lbapi.resource("loadbalancers")
-        check_lbs = True
-        async for lb in lbs_for_cluster(loadbalancers, name):
-            if lb.provisioning_status not in {"PENDING_DELETE", "DELETED"}:
-                await loadbalancers.delete(lb.id, cascade = "true")
-        else:
-            check_lbs = False
-
-        # Delete volumes and snapshots associated with PVCs, unless requested otherwise via the annotation
-        volumeapi = cloud.api_client("volumev3")
-        volumes_detail = volumeapi.resource("volumes/detail")
-        volumes = volumeapi.resource("volumes")
-        check_volumes = False
-        snapshots_detail = volumeapi.resource("snapshots/detail")
-        snapshots = volumeapi.resource("snapshots")
-        check_snapshots = False
+            cacert = None
+        # The value of this annotation on the cluster decides whether to delete volumes
         volumes_annotation_value = meta.get("annotations", {}).get(
             VOLUMES_ANNOTATION,
             VOLUMES_ANNOTATION_DEFAULT
         )
-        if volumes_annotation_value == VOLUMES_ANNOTATION_DELETE:
-            check_volumes, check_snapshots = True, True
-            async for snapshot in snapshots_for_cluster(snapshots_detail, name):
-                if snapshot.status != "deleting":
-                    try:
-                        await snapshots.delete(snapshot.id)
-                    except httpx.HTTPStatusError as exc:
-                        # HTTP 400 from Cinder API indicates that we're trying to
-                        # delete a snapshot which is not in the 'available'.
-                        # We catch this here and simply retry later after we have
-                        # attempted another iteration of cleaning up volumes and
-                        # snapshots.
-                        if exc.response.status_code == 400:
-                            print(f"Recieved HTTP 400 for snapshot {snapshot.id} - will retry delete.")
-                        else:
-                            raise
-            else:
-                check_snapshots = False
-                    
-            async for vol in volumes_for_cluster(volumes_detail, name):
-                if vol.status != "deleting":
-                    try:
-                        await volumes.delete(vol.id)
-                    except httpx.HTTPStatusError as exc:
-                        # HTTP 400 from Cinder API indicates that we're trying to
-                        # delete a volume which is not in the 'available' state or
-                        # which still has snapshots associated. We catch this here
-                        # and simply retry later after we have attempted another
-                        # iteration of cleaning up volumes and snapshots.
-                        if exc.response.status_code == 400:
-                            print(f"Recieved HTTP 400 for volume {vol.id} - will retry delete.")
-                        else:
-                            raise
-            else:
-                check_volumes = False
+        # The value of the annotation on the secret decides whether to remove the appcred
+        # If the annotation is not present, we do not delete the credential
+        credential_annotation_value = clouds_secret.metadata.get("annotations", {}).get(
+            CREDENTIAL_ANNOTATION
+        )
+        remove_appcred = credential_annotation_value == CREDENTIAL_ANNOTATION_DELETE
+        await purge_openstack_resources(
+            logger,
+            clouds,
+            cacert,
+            name,
+            volumes_annotation_value == VOLUMES_ANNOTATION_DELETE,
+            remove_appcred
+        )
+        # If we get to here, OpenStack resources have been successfully deleted
+        # So we can delete the credential secret itself if required
+        if remove_appcred:
+            await secrets.delete(clouds_secret.metadata.name, namespace = namespace)
+            logger.info("cloud credential secret deleted")
 
-        # Check that the resources have actually been deleted
-        if check_fips and not await empty(fips_for_cluster(fips, name)):
-            raise ResourcesStillPresentError("floatingips", name)
-        if check_lbs and not await empty(lbs_for_cluster(loadbalancers, name)):
-            raise ResourcesStillPresentError("loadbalancers", name)
-        if check_volumes and not await empty(volumes_for_cluster(volumes_detail, name)):
-            raise ResourcesStillPresentError("volumes", name)
-        if check_snapshots and not await empty(snapshots_for_cluster(snapshots_detail, name)):
-            raise ResourcesStillPresentError("snapshots", name)
-        
     # If we get to here, we can remove the finalizer
     await patch_finalizers(
         openstackclusters,
@@ -308,3 +377,4 @@ async def on_openstackcluster_event(type, name, namespace, meta, spec, **kwargs)
         namespace,
         [f for f in finalizers if f != FINALIZER]
     )
+    logger.info("removed janitor finalizer from cluster")
