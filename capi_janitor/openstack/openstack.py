@@ -1,6 +1,5 @@
 import asyncio
 import contextlib
-import ssl
 import urllib.parse
 
 import httpx
@@ -25,6 +24,7 @@ class Auth(httpx.Auth):
         self._application_credential_id = application_credential_id
         self._application_credential_secret = application_credential_secret
         self._token = None
+        self._user_id = None
         self._lock = asyncio.Lock()
 
     @contextlib.asynccontextmanager
@@ -59,11 +59,13 @@ class Auth(httpx.Auth):
     def _handle_token_response(self, response):
         response.raise_for_status()
         self._token = response.headers["X-Subject-Token"]
+        self._user_id = response.json()["token"]["user"]["id"]
 
     async def async_auth_flow(self, request):
         if self._token is None:
             async with self._refresh_token():
                 response = yield self._build_token_request()
+                await response.aread()
                 self._handle_token_response(response)
         request.headers['X-Auth-Token'] = self._token
         response = yield request
@@ -80,6 +82,10 @@ class Resource(rest.Resource):
         self._plural_name = plural_name or self._name.split("/")[0]
         # If no singular name is given, assume the name ends in 's'
         self._singular_name = singular_name or self._plural_name[:-1]
+
+    @property
+    def singular_name(self):
+        return self._singular_name
 
     def _extract_list(self, response):
         # Some resources support a /detail endpoint
@@ -126,8 +132,13 @@ class Client(rest.AsyncClient):
         # Prevent individual clients from being used in a context manager
         raise RuntimeError("clients must be used via a cloud object")
     
-    def resource(self, name, plural_name = None, singular_name = None):
-        return Resource(self, name, self._prefix, plural_name, singular_name)
+    def resource(self, name, prefix = None, plural_name = None, singular_name = None):
+        # If an additional prefix is given, combine it with the existing prefix
+        if prefix:
+            prefix = "/".join([self._prefix.rstrip("/"), prefix.lstrip("/")])
+        else:
+            prefix = self._prefix
+        return Resource(self, name, prefix, plural_name, singular_name)
 
 
 class Cloud:
@@ -146,7 +157,14 @@ class Cloud:
         await self._transport.__aenter__()
         # Once the transport has been initialised, we can initialise the endpoints
         client = Client(base_url = self._auth.url, auth = self._auth, transport = self._transport)
-        response = await client.get("/v3/auth/catalog")
+        try:
+            response = await client.get("/v3/auth/catalog")
+        except httpx.HTTPStatusError as exc:
+            # If the auth fails, we just have an empty app catalog
+            if exc.response.status_code == 404:
+                return self
+            else:
+                raise
         self._endpoints = {
             entry["type"]: next(
                 ep["url"]
@@ -161,12 +179,26 @@ class Cloud:
         await self._transport.__aexit__(exc_type, exc_value, traceback)
 
     @property
+    def is_authenticated(self):
+        """
+        Returns True if the cloud is authenticated, False otherwise.
+        """
+        return bool(self._endpoints)
+
+    @property
+    def current_user_id(self):
+        """
+        The ID of the current user.
+        """
+        return self._auth._user_id
+
+    @property
     def apis(self):
         """
         The APIs supported by the cloud.
         """
         return list(self._endpoints.keys())
-
+    
     def api_client(self, name, prefix = None):
         """
         Returns a client for the named API.
