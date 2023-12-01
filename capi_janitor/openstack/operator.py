@@ -43,6 +43,14 @@ async def on_cleanup(**kwargs):
     await ekclient.aclose()
 
 
+class FinalizerStillPresentError(Exception):
+    """
+    Raised when a finalizer from another controller is preventing us from deleting an appcred.
+    """
+    def __init__(self, finalizer, cluster):
+        super().__init__(f"finalizer '{finalizer}' still present for cluster {cluster}")
+
+
 class ResourcesStillPresentError(Exception):
     """
     Raised when cluster resources are still present even after being deleted,
@@ -326,11 +334,12 @@ async def on_openstackcluster_event(name, namespace, meta, spec, logger, **kwarg
             logger.info("added janitor finalizer to cluster")
         return
     
-    # If we are being deleted but the finalizer has already been removed,
-    # then there is nothing to do
+    # NOTE: If we get to here, the cluster is deleting
+
+    # If our finalizer is not present, we don't do anything
     if FINALIZER not in finalizers:
         return
-    
+
     # Get the cloud credential from the cluster and use it to delete dangling
     # resources created by OpenStack integrations on the cluster
     secrets = await ekclient.api("v1").resource("secrets")
@@ -350,8 +359,14 @@ async def on_openstackcluster_event(name, namespace, meta, spec, logger, **kwarg
             VOLUMES_ANNOTATION,
             VOLUMES_ANNOTATION_DEFAULT
         )
-        # The value of the annotation on the secret decides whether to remove the appcred
-        # If the annotation is not present, we do not delete the credential
+        # We want to remove the appcred iff:
+        #
+        #   1. The annotation on the secret is present and says delete
+        #   2. Our finalizer is the last finalizer
+        #
+        # This is because we need to allow CAPO to finish its work before we remove the
+        # appcred + secret, but we do need to act to remove other resources that might
+        # block CAPO from completing
         credential_annotation_value = clouds_secret.metadata.get("annotations", {}).get(
             CREDENTIAL_ANNOTATION
         )
@@ -362,13 +377,16 @@ async def on_openstackcluster_event(name, namespace, meta, spec, logger, **kwarg
             cacert,
             name,
             volumes_annotation_value == VOLUMES_ANNOTATION_DELETE,
-            remove_appcred
+            remove_appcred and len(finalizers) == 1
         )
         # If we get to here, OpenStack resources have been successfully deleted
-        # So we can delete the credential secret itself if required
-        if remove_appcred:
+        # So we can remove the appcred secret if we are the last actor
+        if remove_appcred and len(finalizers) == 1:
             await secrets.delete(clouds_secret.metadata.name, namespace = namespace)
             logger.info("cloud credential secret deleted")
+        elif remove_appcred:
+            # If the annotation says delete but other controllers are still acting, go round again
+            raise FinalizerStillPresentError(next(f for f in finalizers if f != FINALIZER), name)
 
     # If we get to here, we can remove the finalizer
     await patch_finalizers(
