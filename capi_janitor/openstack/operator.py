@@ -115,16 +115,17 @@ async def empty(async_iterator):
         return False
 
 
-async def try_delete(logger, resource, instances):
+async def try_delete(logger, resource, instances, **kwargs):
     """
     Tries to delete the specified instances, catching 400 and 409 exceptions for retry.
 
     It returns a boolean indicating whether a check is required for the resource.
     """
-    check_required = True
+    check_required = False
     async for instance in instances:
+        check_required = True
         try:
-            await resource.delete(instance.id)
+            await resource.delete(instance.id, **kwargs)
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code in {400, 409}:
                 logger.warn(
@@ -133,8 +134,6 @@ async def try_delete(logger, resource, instances):
                 )
             else:
                 raise
-    else:
-        check_required = False
     return check_required
 
 
@@ -165,7 +164,12 @@ async def purge_openstack_resources(
         # Delete any loadbalancers associated with loadbalancer services for the cluster
         lbapi = cloud.api_client("load-balancer", "/v2/lbaas/")
         loadbalancers = lbapi.resource("loadbalancers")
-        check_lbs = await try_delete(logger, loadbalancers, lbs_for_cluster(loadbalancers, name))
+        check_lbs = await try_delete(
+            logger,
+            loadbalancers,
+            lbs_for_cluster(loadbalancers, name),
+            cascade = "true"
+        )
         logger.info("deleted load balancers for LoadBalancer services")
 
         # Delete volumes and snapshots associated with PVCs, unless requested
@@ -266,6 +270,9 @@ def retry_event(handler):
             if isinstance(exc, kopf.TemporaryError):
                 kwargs["logger"].warn(str(exc))
                 backoff = exc.delay
+            elif isinstance(exc, (FinalizerStillPresentError, ResourcesStillPresentError)):
+                kwargs["logger"].warn(str(exc))
+                backoff = 5
             else:
                 kwargs["logger"].exception(str(exc))
                 # Calculate the backoff
