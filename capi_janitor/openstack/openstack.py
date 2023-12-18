@@ -173,15 +173,14 @@ class Cloud:
         #     )
         #     for entry in response.json()["catalog"]
         # }
+        self._endpoints = {}
         try:
             catalog = response.json()["catalog"]
-            endpoints = {}
             for entry in catalog:
-                endpoints[entry["type"]] = [ep["url"] for ep in entry["endpoints"] if ep["interface"] == self._interface]
-            self._endpoints = endpoints
-        except Exception as exc:
+                self._endpoints[entry["type"]] = [ep["url"] for ep in entry["endpoints"] if ep["interface"] == self._interface]
+        except StopIteration as exc:
             print(f"Caught: {exc}")
-            raise
+            pass
 
         return self
 
