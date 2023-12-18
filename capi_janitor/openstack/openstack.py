@@ -165,14 +165,23 @@ class Cloud:
                 return self
             else:
                 raise
-        self._endpoints = {
-            entry["type"]: next(
-                ep["url"]
-                for ep in entry["endpoints"]
-                if ep["interface"] == self._interface
-            )
-            for entry in response.json()["catalog"]
-        }
+        # self._endpoints = {
+        #     entry["type"]: next(
+        #         ep["url"]
+        #         for ep in entry["endpoints"]
+        #         if ep["interface"] == self._interface
+        #     )
+        #     for entry in response.json()["catalog"]
+        # }
+        try:
+            catalog = await response.json()["catalog"]
+            endpoints = {}
+            for entry in catalog:
+                endpoints[entry["type"]] = [ep["url"] for ep in entry["endpoints"] if ep["interface"] == self._interface]
+            self._endpoints = endpoints
+        except Exception as exc:
+            print(f"Caught: {exc}")
+
         return self
 
     async def __aexit__(self, exc_type, exc_value, traceback):
