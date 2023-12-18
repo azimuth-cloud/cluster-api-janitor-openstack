@@ -181,6 +181,7 @@ class Cloud:
             self._endpoints = endpoints
         except Exception as exc:
             print(f"Caught: {exc}")
+            raise
 
         return self
 
