@@ -174,7 +174,7 @@ class Cloud:
         #     for entry in response.json()["catalog"]
         # }
         try:
-            catalog = await response.json()["catalog"]
+            catalog = response.json()["catalog"]
             endpoints = {}
             for entry in catalog:
                 endpoints[entry["type"]] = [ep["url"] for ep in entry["endpoints"] if ep["interface"] == self._interface]
