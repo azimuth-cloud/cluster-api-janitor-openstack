@@ -174,10 +174,10 @@ class Cloud:
                 )
                 for entry in response.json()["catalog"] if len(entry["endpoints"]) > 0
             }
-        # except StopIteration as exc:
-        #     print(f"Caught: {exc}")
-        #     print(f"DEBUG: response")
-        #     pass
+        except StopIteration as exc:
+            print(f"Caught: {exc}")
+            print(f"DEBUG: response")
+            pass
 
         return self
 
