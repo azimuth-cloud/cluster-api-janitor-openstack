@@ -165,21 +165,23 @@ class Cloud:
                 return self
             else:
                 raise
-        # self._endpoints = {
-        #     entry["type"]: next(
-        #         ep["url"]
-        #         for ep in entry["endpoints"]
-        #         if ep["interface"] == self._interface
-        #     )
-        #     for entry in response.json()["catalog"]
-        # }
-        self._endpoints = {}
         try:
-            catalog = response.json()["catalog"]
-            for entry in catalog:
-                self._endpoints[entry["type"]] = [ep["url"] for ep in entry["endpoints"] if ep["interface"] == self._interface]
+            self._endpoints = {
+                entry["type"]: next(
+                    ep["url"]
+                    for ep in entry["endpoints"]
+                    if ep["interface"] == self._interface
+                )
+                for entry in response.json()["catalog"]
+            }
+        # self._endpoints = {}
+        # try:
+        #     catalog = response.json()["catalog"]
+        #     for entry in catalog:
+        #         self._endpoints[entry["type"]] = [ep["url"] for ep in entry["endpoints"] if ep["interface"] == self._interface]
         except StopIteration as exc:
             print(f"Caught: {exc}")
+            print(f"Endpoints: {self._endpoints}")
             pass
 
         return self
