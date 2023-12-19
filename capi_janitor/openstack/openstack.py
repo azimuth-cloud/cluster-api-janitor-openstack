@@ -166,6 +166,7 @@ class Cloud:
             else:
                 raise
         try:
+            print(response.json())
             self._endpoints = {
                 entry["type"]: next(
                     ep["url"]
