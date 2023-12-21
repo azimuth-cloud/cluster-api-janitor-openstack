@@ -171,9 +171,9 @@ class Cloud:
                 for ep in entry["endpoints"]
                 if ep["interface"] == self._interface
             )
-            for entry in response.json()["catalog"] if len(entry["endpoints"]) > 0
+            for entry in response.json()["catalog"]
+            if len(entry["endpoints"]) > 0
         }
-
         return self
 
     async def __aexit__(self, exc_type, exc_value, traceback):
