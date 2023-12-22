@@ -172,6 +172,7 @@ class Cloud:
                 if ep["interface"] == self._interface
             )
             for entry in response.json()["catalog"]
+            if len(entry["endpoints"]) > 0
         }
         return self
 
