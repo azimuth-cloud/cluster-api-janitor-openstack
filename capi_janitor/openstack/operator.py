@@ -140,6 +140,7 @@ async def try_delete(logger, resource, instances, **kwargs):
 async def purge_openstack_resources(
     logger,
     clouds,
+    cloud_name,
     cacert,
     name,
     include_volumes,
@@ -149,7 +150,7 @@ async def purge_openstack_resources(
     Cleans up the OpenStack resources created by the OCCM and CSI for a cluster.
     """
     # Use the credential to delete external resources as required
-    async with openstack.Cloud.from_clouds(clouds, cacert = cacert) as cloud:
+    async with openstack.Cloud.from_clouds(clouds, cloud_name, cacert) as cloud:
         # If the session is not authenticated, there is nothing we can do
         if not cloud.is_authenticated:
             logger.warn("application credential has been deleted")
@@ -361,6 +362,9 @@ async def on_openstackcluster_event(name, namespace, meta, spec, logger, **kwarg
             cacert = base64.b64decode(clouds_secret.data["cacert"]).decode()
         else:
             cacert = None
+        # The cloud name comes from spec.identityRef.cloudName from v1beta1 onwards
+        # Prior to that, it comes from spec.cloudName
+        cloud_name = spec["identityRef"].get("cloudName", spec.get("cloudName", "openstack"))
         # The value of this annotation on the cluster decides whether to delete volumes
         volumes_annotation_value = meta.get("annotations", {}).get(
             VOLUMES_ANNOTATION,
@@ -381,6 +385,7 @@ async def on_openstackcluster_event(name, namespace, meta, spec, logger, **kwarg
         await purge_openstack_resources(
             logger,
             clouds,
+            cloud_name,
             cacert,
             name,
             volumes_annotation_value == VOLUMES_ANNOTATION_DELETE,
