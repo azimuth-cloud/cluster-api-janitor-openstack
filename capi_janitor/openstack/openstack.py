@@ -214,7 +214,7 @@ class Cloud:
         return self._clients[name]
 
     @classmethod
-    def from_clouds(cls, clouds, cloud = "openstack", cacert = None):
+    def from_clouds(cls, clouds, cloud, cacert):
         config = clouds["clouds"][cloud]
         if config["auth_type"] != "v3applicationcredential":
             raise UnsupportedAuthenticationError(config["auth_type"])
