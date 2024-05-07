@@ -130,7 +130,7 @@ async def try_delete(logger, resource, instances, **kwargs):
             if exc.response.status_code in {400, 409}:
                 logger.warn(
                     f"got status code {exc.response.status_code} when attempting to delete "
-                    f"{resource.singular_name} with ID {id} - will retry"
+                    f"{resource.singular_name} with ID {instance.id} - will retry"
                 )
             else:
                 raise
