@@ -15,7 +15,7 @@ for Kubernetes clusters created using the
 ```sh
 helm repo add \
   cluster-api-janitor-openstack \
-  https://stackhpc.github.io/cluster-api-janitor-openstack
+  https://azimuth-cloud.github.io/cluster-api-janitor-openstack
 
 # Use the latest version from the main branch
 helm upgrade \
@@ -76,7 +76,7 @@ the resources have been deleted, the finalizer is removed.
 > of the `OpenStackCluster` resource.
 >
 > For instance, the `openstack-cluster` chart from the
-> [capi-helm-charts](https://github.com/stackhpc/capi-helm-charts) ensures that this happens
+> [capi-helm-charts](https://github.com/azimuth-cloud/capi-helm-charts) ensures that this happens
 > automatically.
 
 The advantage of this approach vs. a task that runs before the cluster deletion is started

@@ -29,8 +29,8 @@ jobs:
   fail_on_remote:
     runs-on: ubuntu-latest
     steps:
-      - name: PR must be from a branch in the stackhpc/cluster-api-janitor-openstack repo
-        run: exit ${{ github.event.pull_request.head.repo.full_name == 'stackhpc/cluster-api-janitor-openstack' && '0' || '1' }}
+      - name: PR must be from a branch in the azimuth-cloud/cluster-api-janitor-openstack repo
+        run: exit ${{ github.event.pull_request.head.repo.full_name == 'azimuth-cloud/cluster-api-janitor-openstack' && '0' || '1' }}
 
   publish_artifacts:
     needs: [fail_on_remote]
@@ -54,6 +54,7 @@ jobs:
           # We also don't need all the tests
           # The Kubernetes test is sufficient to confirm the janitor is working
           extra-vars: |
+            clusterapi_janitor_openstack_chart_repo: https://azimuth-cloud.github.io/cluster-api-janitor-openstack
             clusterapi_janitor_openstack_chart_version: ${{ needs.publish_artifacts.outputs.chart-version }}
             generate_tests_caas_suite_enabled: false
             generate_tests_kubernetes_apps_suite_enabled: false
