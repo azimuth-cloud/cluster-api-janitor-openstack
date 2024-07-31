@@ -3,7 +3,7 @@ defaultVolumesPolicy: delete
 
 # The image to use for the operator
 image:
-  repository: ghcr.io/stackhpc/cluster-api-janitor-openstack
+  repository: ghcr.io/azimuth-cloud/cluster-api-janitor-openstack
   pullPolicy: IfNotPresent
   tag: ""  # Defaults to appVersion if not given
 
