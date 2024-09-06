@@ -21,8 +21,7 @@ helm repo add \
 helm upgrade \
   cluster-api-janitor-openstack \
   cluster-api-janitor-openstack/cluster-api-janitor-openstack \
-  --install \
-  --version ">=0.1.0-dev.0.main.0,<0.1.0-dev.0.main.9999999999"
+  --install
 ```
 
 ## Configuration
