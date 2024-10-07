@@ -3,6 +3,7 @@ import base64
 import functools
 import os
 import random
+import string
 
 import kopf
 import yaml
@@ -30,8 +31,8 @@ VOLUMES_ANNOTATION_DEFAULT = os.environ.get(
 CREDENTIAL_ANNOTATION = "janitor.capi.stackhpc.com/credential-policy"
 CREDENTIAL_ANNOTATION_DELETE = "delete"
 
-RETRY_ANNOTATION = "janitor.capi.stackhpc.com/retries"
-RETRY_MAX_BACKOFF = int(os.environ.get("CAPI_JANITOR_RETRY_MAX_BACKOFF", "60"))
+RETRY_ANNOTATION = "janitor.capi.stackhpc.com/retry"
+RETRY_DEFAULT_DELAY = int(os.environ.get("CAPI_JANITOR_RETRY_DEFAULT_DELAY", "60"))
 
 
 @kopf.on.cleanup()
@@ -264,10 +265,8 @@ def retry_event(handler):
         body = kwargs["body"]
         resource = await ekclient.api(body["apiVersion"]).resource(body["kind"])
         try:
-            result = await handler(**kwargs)
+            return await handler(**kwargs)
         except Exception as exc:
-            # Check to see how many times a handler has been retried
-            retries = int(kwargs["annotations"].get(RETRY_ANNOTATION, "0"))
             if isinstance(exc, kopf.TemporaryError):
                 kwargs["logger"].warn(str(exc))
                 backoff = exc.delay
@@ -277,16 +276,22 @@ def retry_event(handler):
             else:
                 kwargs["logger"].exception(str(exc))
                 # Calculate the backoff
-                backoff = min(2**retries + random.uniform(0, 1), RETRY_MAX_BACKOFF)
+                backoff = RETRY_DEFAULT_DELAY
             # Wait for the backoff before annotating the resource
             await asyncio.sleep(backoff)
+            # Annotate the object with a random value to trigger another event
             try:
                 await resource.patch(
                     kwargs["name"],
                     {
                         "metadata": {
                             "annotations": {
-                                RETRY_ANNOTATION: str(retries + 1),
+                                RETRY_ANNOTATION: "".join(
+                                    random.choices(
+                                        string.ascii_lowercase + string.digits,
+                                        k = 8
+                                    )
+                                ),
                             }
                         }
                     },
@@ -295,26 +300,6 @@ def retry_event(handler):
             except easykube.ApiError as exc:
                 if exc.status_code != 404:
                     raise
-        else:
-            if RETRY_ANNOTATION in kwargs["annotations"]:
-                # If the handler completes successfully, ensure the annotation is removed
-                # The forward slash in the annotation is designated by '~1' in JSON patch
-                annotation = RETRY_ANNOTATION.replace('/', '~1')
-                try:
-                    await resource.json_patch(
-                        kwargs["name"],
-                        [
-                            {
-                                "op": "remove",
-                                "path": f"/metadata/annotations/{annotation}",
-                            },
-                        ],
-                        namespace = kwargs["namespace"]
-                    )
-                except easykube.ApiError as exc:
-                    if exc.status_code != 404:
-                        raise
-            return result
     return wrapper
     
 
