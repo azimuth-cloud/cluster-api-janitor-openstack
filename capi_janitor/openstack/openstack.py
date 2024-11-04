@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import re
 import urllib.parse
 
 import httpx
@@ -13,6 +14,13 @@ class UnsupportedAuthenticationError(Exception):
     """
     def __init__(self, auth_type):
         super().__init__(f"unsupported authentication type: {auth_type}")
+
+class AuthenticationError(Exception):
+    """
+    Raised when an unknown authentication error is encountered.
+    """
+    def __init__(self, user):
+        super().__init__(f"failed to authenticate as user: {user}")
 
 
 class Auth(httpx.Auth):
@@ -55,7 +63,7 @@ class Auth(httpx.Auth):
                 },
             }
         )
-    
+
     def _handle_token_response(self, response):
         response.raise_for_status()
         self._token = response.headers["X-Subject-Token"]
@@ -91,7 +99,7 @@ class Resource(rest.Resource):
         # Some resources support a /detail endpoint
         # In this case, we just want to use the name up to the slash
         return response.json()[self._plural_name]
-    
+
     def _extract_next_page(self, response):
         next_url = next(
             (
@@ -131,7 +139,7 @@ class Client(rest.AsyncClient):
     def __aenter__(self):
         # Prevent individual clients from being used in a context manager
         raise RuntimeError("clients must be used via a cloud object")
-    
+
     def resource(self, name, prefix = None, plural_name = None, singular_name = None):
         # If an additional prefix is given, combine it with the existing prefix
         if prefix:
@@ -199,7 +207,7 @@ class Cloud:
         The APIs supported by the cloud.
         """
         return list(self._endpoints.keys())
-    
+
     def api_client(self, name, prefix = None):
         """
         Returns a client for the named API.
@@ -218,8 +226,9 @@ class Cloud:
         config = clouds["clouds"][cloud]
         if config["auth_type"] != "v3applicationcredential":
             raise UnsupportedAuthenticationError(config["auth_type"])
+        auth_url = re.sub("/v3/?$", "", config["auth"]["auth_url"])
         auth = Auth(
-            config["auth"]["auth_url"],
+            auth_url,
             config["auth"]["application_credential_id"],
             config["auth"]["application_credential_secret"]
         )
