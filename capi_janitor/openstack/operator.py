@@ -152,9 +152,15 @@ async def purge_openstack_resources(
     """
     # Use the credential to delete external resources as required
     async with openstack.Cloud.from_clouds(clouds, cloud_name, cacert) as cloud:
-        # If the session is not authenticated, there is nothing we can do
         if not cloud.is_authenticated:
-            logger.warn("application credential has been deleted")
+            if include_appcred:
+                # If the session is not authenticated then we've already
+                # cleaned up and deleted the app cred.
+                logger.warn("application credential has been deleted")
+            else:
+                # Raise an error and skip removing the finalizer to block cluster
+                # deletion to avoid leaking resources.
+                raise openstack.AuthenticationError(cloud.current_user_id)
             return
 
         # Release any floating IPs associated with loadbalancer services for the cluster
@@ -301,7 +307,7 @@ def retry_event(handler):
                 if exc.status_code != 404:
                     raise
     return wrapper
-    
+
 
 @kopf.on.event(CAPO_API_GROUP, "openstackclusters")
 @retry_event
@@ -326,7 +332,7 @@ async def on_openstackcluster_event(name, namespace, meta, spec, logger, **kwarg
             )
             logger.info("added janitor finalizer to cluster")
         return
-    
+
     # NOTE: If we get to here, the cluster is deleting
 
     # If our finalizer is not present, we don't do anything
