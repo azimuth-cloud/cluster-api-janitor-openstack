@@ -27,11 +27,10 @@ class Auth(httpx.Auth):
     """
     Authenticator class for OpenStack connections.
     """
-    def __init__(self, auth_url, application_credential_id, application_credential_secret, region_name):
+    def __init__(self, auth_url, application_credential_id, application_credential_secret):
         self.url = auth_url
         self._application_credential_id = application_credential_id
         self._application_credential_secret = application_credential_secret
-        self.region_name = region_name
         self._token = None
         self._user_id = None
         self._lock = asyncio.Lock()
@@ -154,11 +153,12 @@ class Cloud:
     """
     Object for interacting with OpenStack clouds.
     """
-    def __init__(self, auth, transport, interface):
+    def __init__(self, auth, transport, interface, region = None):
         self._auth = auth
         self._transport = transport
         self._interface = interface
         self._endpoints = {}
+        self._region = region
         # A map of api name to client
         self._clients = {}
 
@@ -175,18 +175,7 @@ class Cloud:
             else:
                 raise
         self._endpoints = {
-            entry["type"]: next(
-                ep["url"]
-                for ep in entry["endpoints"]
-                if (
-                    ep["interface"] == self._interface
-                    # NOTE(scott): Entrypoint has 'region_id' and 'region'
-                    # fields whereas app cred has a 'region_name' field.
-                    # This code assumes that app cred 'region_name' maps
-                    # to catalog entry 'region' rather than 'region_id'.
-                    and ep["region"] == self._auth.region_name
-                )
-            )
+            entry["type"]: self._service_endpoint(entry)["url"]
             for entry in response.json()["catalog"]
             if len(entry["endpoints"]) > 0
         }
@@ -229,6 +218,25 @@ class Cloud:
             )
         return self._clients[name]
 
+    def _service_endpoint(self, endpoints):
+        """
+        Filters the target cloud's catalog endpoints to find the relevant entry.
+        """
+        iface_endpoints = [ep for ep in endpoints if ep["interface"] == self._interface]
+        # If there's no region_name field in the clouds.yaml we use the first endpoint which
+        # matches the interface name for consistent behaviour with the OpenStack CLI.
+        if not self._region:
+            return iface_endpoints[0]
+        # Otherwise, further filter by region name
+        region_endpoints = [ep for ep in iface_endpoints if ep["region"] == self._region]
+        if len(region_endpoints) != 1:
+            raise Exception(
+                "Failed to find a unique catalog endpoints for"
+                f" interface {region_endpoints[0]['interface']}"
+                f" and region {region_endpoints[0]['region']}"
+            )
+        return region_endpoints[0]
+
     @classmethod
     def from_clouds(cls, clouds, cloud, cacert):
         config = clouds["clouds"][cloud]
@@ -238,13 +246,13 @@ class Cloud:
         auth = Auth(
             auth_url,
             config["auth"]["application_credential_id"],
-            config["auth"]["application_credential_secret"],
-            config["region_name"]
+            config["auth"]["application_credential_secret"]
         )
+        region = config.get("region_name")
         # Create a default context using the verification from the config
         context = httpx.create_ssl_context(verify = config.get("verify", True))
         # If a cacert was given, load it into the context
         if cacert is not None:
             context.load_verify_locations(cadata = cacert)
         transport = httpx.AsyncHTTPTransport(verify = context)
-        return cls(auth, transport, config.get("interface", "public"))
+        return cls(auth, transport, config.get("interface", "public"), region)
