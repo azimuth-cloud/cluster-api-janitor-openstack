@@ -27,10 +27,11 @@ class Auth(httpx.Auth):
     """
     Authenticator class for OpenStack connections.
     """
-    def __init__(self, auth_url, application_credential_id, application_credential_secret):
+    def __init__(self, auth_url, application_credential_id, application_credential_secret, region_name):
         self.url = auth_url
         self._application_credential_id = application_credential_id
         self._application_credential_secret = application_credential_secret
+        self.region_name = region_name
         self._token = None
         self._user_id = None
         self._lock = asyncio.Lock()
@@ -177,7 +178,14 @@ class Cloud:
             entry["type"]: next(
                 ep["url"]
                 for ep in entry["endpoints"]
-                if ep["interface"] == self._interface
+                if (
+                    ep["interface"] == self._interface
+                    # NOTE(scott): Entrypoint has 'region_id' and 'region'
+                    # fields whereas app cred has a 'region_name' field.
+                    # This code assumes that app cred 'region_name' maps
+                    # to catalog entry 'region' rather than 'region_id'.
+                    and ep["region"] == self._auth.region_name
+                )
             )
             for entry in response.json()["catalog"]
             if len(entry["endpoints"]) > 0
@@ -230,7 +238,8 @@ class Cloud:
         auth = Auth(
             auth_url,
             config["auth"]["application_credential_id"],
-            config["auth"]["application_credential_secret"]
+            config["auth"]["application_credential_secret"],
+            config["region_name"]
         )
         # Create a default context using the verification from the config
         context = httpx.create_ssl_context(verify = config.get("verify", True))
