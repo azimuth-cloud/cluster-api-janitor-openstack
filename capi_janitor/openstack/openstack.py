@@ -218,10 +218,11 @@ class Cloud:
             )
         return self._clients[name]
 
-    def _service_endpoint(self, endpoints):
+    def _service_endpoint(self, catalog_entry):
         """
         Filters the target cloud's catalog endpoints to find the relevant entry.
         """
+        endpoints = catalog_entry["endpoints"]
         iface_endpoints = [ep for ep in endpoints if ep["interface"] == self._interface]
         # If there's no region_name field in the clouds.yaml we use the first endpoint which
         # matches the interface name for consistent behaviour with the OpenStack CLI.
