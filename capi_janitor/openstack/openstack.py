@@ -175,7 +175,14 @@ class Cloud:
             else:
                 raise
         self._endpoints = {
-            entry["type"]: self._service_endpoint(entry)["url"]
+            entry["type"]: next(
+                ep["url"]
+                for ep in entry["endpoints"]
+                if (
+                    ep["interface"] == self._interface and
+                    (not self._region or ep["region"] == self._region)
+                )
+            )
             for entry in response.json()["catalog"]
             if len(entry["endpoints"]) > 0
         }
@@ -217,26 +224,6 @@ class Cloud:
                 transport = self._transport
             )
         return self._clients[name]
-
-    def _service_endpoint(self, catalog_entry):
-        """
-        Filters the target cloud's catalog endpoints to find the relevant entry.
-        """
-        endpoints = catalog_entry["endpoints"]
-        iface_endpoints = [ep for ep in endpoints if ep["interface"] == self._interface]
-        # If there's no region_name field in the clouds.yaml we use the first endpoint which
-        # matches the interface name for consistent behaviour with the OpenStack CLI.
-        if not self._region:
-            return iface_endpoints[0]
-        # Otherwise, further filter by region name
-        region_endpoints = [ep for ep in iface_endpoints if ep["region"] == self._region]
-        if len(region_endpoints) != 1:
-            raise Exception(
-                "Failed to find a unique catalog endpoints for"
-                f" interface {region_endpoints[0]['interface']}"
-                f" and region {region_endpoints[0]['region']}"
-            )
-        return region_endpoints[0]
 
     @classmethod
     def from_clouds(cls, clouds, cloud, cacert):
