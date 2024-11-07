@@ -153,11 +153,12 @@ class Cloud:
     """
     Object for interacting with OpenStack clouds.
     """
-    def __init__(self, auth, transport, interface):
+    def __init__(self, auth, transport, interface, region = None):
         self._auth = auth
         self._transport = transport
         self._interface = interface
         self._endpoints = {}
+        self._region = region
         # A map of api name to client
         self._clients = {}
 
@@ -177,7 +178,10 @@ class Cloud:
             entry["type"]: next(
                 ep["url"]
                 for ep in entry["endpoints"]
-                if ep["interface"] == self._interface
+                if (
+                    ep["interface"] == self._interface and
+                    (not self._region or ep["region"] == self._region)
+                )
             )
             for entry in response.json()["catalog"]
             if len(entry["endpoints"]) > 0
@@ -232,10 +236,11 @@ class Cloud:
             config["auth"]["application_credential_id"],
             config["auth"]["application_credential_secret"]
         )
+        region = config.get("region_name")
         # Create a default context using the verification from the config
         context = httpx.create_ssl_context(verify = config.get("verify", True))
         # If a cacert was given, load it into the context
         if cacert is not None:
             context.load_verify_locations(cadata = cacert)
         transport = httpx.AsyncHTTPTransport(verify = context)
-        return cls(auth, transport, config.get("interface", "public"))
+        return cls(auth, transport, config.get("interface", "public"), region)
