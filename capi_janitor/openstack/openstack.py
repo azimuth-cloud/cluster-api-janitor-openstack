@@ -87,7 +87,7 @@ class Resource(rest.Resource):
         super().__init__(client, name, prefix)
         # Some resources support a /detail endpoint
         # In this case, we just want to use the name up to the slash as the plural name
-        self._plural_name = plural_name or self._name.split("/")[0]
+        self._plural_name = plural_name or self._name.split("/")[0].replace("-", "_")
         # If no singular name is given, assume the name ends in 's'
         self._singular_name = singular_name or self._plural_name[:-1]
 
