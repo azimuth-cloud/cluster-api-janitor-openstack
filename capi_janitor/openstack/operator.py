@@ -82,6 +82,18 @@ async def lbs_for_cluster(resource, cluster):
             yield lb
 
 
+async def secgroups_for_cluster(resource, cluster):
+    """
+    Async iterator for security groups belonging to the specified cluster.
+    """
+    async for sg in resource.list():
+        if not sg.description.startswith("Security Group for"):
+            continue
+        if not sg.description.endswith(f"Service LoadBalancer in cluster {cluster}"):
+            continue
+        yield sg
+
+
 async def volumes_for_cluster(resource, cluster):
     """
     Async iterator for volumes belonging to the specified cluster.
@@ -180,6 +192,15 @@ async def purge_openstack_resources(
         )
         logger.info("deleted load balancers for LoadBalancer services")
 
+        # Delete any security groups associated with loadbalancer services for the cluster
+        secgroups = networkapi.resource("security-groups")
+        check_secgroups = await try_delete(
+            logger,
+            secgroups,
+            secgroups_for_cluster(secgroups, name)
+        )
+        logger.info("deleted security groups for LoadBalancer services")
+
         # Delete volumes and snapshots associated with PVCs, unless requested
         # otherwise via the annotation
         volumeapi = cloud.api_client("volumev3")
@@ -208,6 +229,8 @@ async def purge_openstack_resources(
             raise ResourcesStillPresentError("floatingips", name)
         if check_lbs and not await empty(lbs_for_cluster(loadbalancers, name)):
             raise ResourcesStillPresentError("loadbalancers", name)
+        if check_secgroups and not await empty(secgroups_for_cluster(secgroups, name)):
+            raise ResourcesStillPresentError("security-groups", name)
         if check_volumes and not await empty(volumes_for_cluster(volumes_detail, name)):
             raise ResourcesStillPresentError("volumes", name)
         if check_snapshots and not await empty(snapshots_for_cluster(snapshots_detail, name)):
