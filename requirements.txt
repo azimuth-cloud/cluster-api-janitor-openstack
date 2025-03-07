@@ -16,7 +16,7 @@ idna==3.10
 iso8601==2.1.0
 kopf==1.37.4
 multidict==6.1.0
-propcache==0.2.1
+propcache==0.3.0
 python-json-logger==3.3.0
 PyYAML==6.0.2
 sniffio==1.3.1
