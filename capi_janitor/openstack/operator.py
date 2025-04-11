@@ -334,13 +334,17 @@ def retry_event(handler):
 
 @kopf.on.event(CAPO_API_GROUP, "openstackclusters")
 @retry_event
-async def on_openstackcluster_event(name, namespace, meta, spec, logger, **kwargs):
+async def on_openstackcluster_event(name, namespace, meta, labels, spec, logger, **kwargs):
     """
     Executes whenever an event occurs for an OpenStack cluster.
     """
     # Get the resource for manipulating OpenStackClusters at the preferred version
     capoapi = await ekclient.api_preferred_version(CAPO_API_GROUP)
     openstackclusters = await capoapi.resource("openstackclusters")
+    # Use the value of the `cluster.x-k8s.io/cluster-name` label as the cluster name if it exists,
+    # otherwise, fall back to the OpenStackCluster resource name.
+    clustername = labels.get("cluster.x-k8s.io/cluster-name", name)
+    logger.debug(f"cluster name that will be used for cleanup: '{clustername}'")
 
     finalizers = meta.get("finalizers", [])
     # We add a custom finalizer to OpenStack cluster objects to
@@ -401,7 +405,7 @@ async def on_openstackcluster_event(name, namespace, meta, spec, logger, **kwarg
             clouds,
             cloud_name,
             cacert,
-            name,
+            clustername,
             volumes_annotation_value == VOLUMES_ANNOTATION_DELETE,
             remove_appcred and len(finalizers) == 1
         )

@@ -66,17 +66,20 @@ Cluster API `Cluster`, from being removed until the finalizer is removed.
 (specifically, it waits for the `deletionTimestamp` to be set, indicating that a deletion
 has been requested), at which point it uses the credential from
 `OpenStackCluster.spec.identityRef` to remove any dangling resources that were created by
-the OCCM or Cinder CSI with the same cluster name as the cluster being deleted. Once all
-the resources have been deleted, the finalizer is removed.
+the OCCM or Cinder CSI with the same cluster name as the cluster being deleted. 
+The cluster name is determined by the `cluster.x-k8s.io/cluster-name` label on the OpenStackCluster resource, if present.
+If the label is not set, the name of the OpenStackCluster resource (`metadata.name`) is used instead.
+Once all the resources have been deleted, the finalizer is removed.
 
 > **WARNING**
 >
 > The cluster name of the OCCM and Cinder CSI **must** be set to the `metadata.name`
-> of the `OpenStackCluster` resource.
+> of the OpenStackCluster resource, or to the value of the `cluster.x-k8s.io/cluster-name`
+> label if it is present on the OpenStackCluster resource.
 >
 > For instance, the `openstack-cluster` chart from the
 > [capi-helm-charts](https://github.com/azimuth-cloud/capi-helm-charts) ensures that this happens
-> automatically.
+> automatically and sets the OpenStackCluster's `metadata.name` for OCCM and Cinder CSI.
 
 The advantage of this approach vs. a task that runs before the cluster deletion is started
 is that the external resource deletion happens _after_ all the machines have been deleted,
