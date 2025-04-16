@@ -22,6 +22,13 @@ class AuthenticationError(Exception):
     def __init__(self, user):
         super().__init__(f"failed to authenticate as user: {user}")
 
+class CatalogError(Exception):
+    """
+    Raised when an unknown catalog service type is requested.
+    """
+    def __init__(self, name):
+        super().__init__(f"service type {name} not found in OpenStack service catalog")
+
 
 class Auth(httpx.Auth):
     """
