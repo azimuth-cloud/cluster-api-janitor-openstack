@@ -22,6 +22,13 @@ class AuthenticationError(Exception):
     def __init__(self, user):
         super().__init__(f"failed to authenticate as user: {user}")
 
+class CatalogError(Exception):
+    """
+    Raised when an unknown catalog service type is requested.
+    """
+    def __init__(self, name):
+        super().__init__(f"service type {name} not found in OpenStack service catalog")
+
 
 class Auth(httpx.Auth):
     """
@@ -128,13 +135,17 @@ class Client(rest.AsyncClient):
     Client for OpenStack APIs.
     """
     def __init__(self, /, base_url, prefix = None, **kwargs):
-        # Extract the path part of the base_url
+        # Extract the path part of the base_url
         url = urllib.parse.urlsplit(base_url)
         # Initialise the client with the scheme/host
         super().__init__(base_url = f"{url.scheme}://{url.netloc}", **kwargs)
-        # If another prefix is not given, use the path from the base URL as the prefix
+        # If another prefix is not given, use the path from the base URL as the prefix,
+        # otherwise combine the prefixes and remove duplicates path sections.
         # This ensures things like pagination work nicely without duplicating the prefix
-        self._prefix = prefix or url.path
+        if prefix:
+            self._prefix = "/".join([url.path.rstrip("/"), prefix.lstrip("/").lstrip(url.path)])
+        else:
+            self._prefix = url.path
 
     def __aenter__(self):
         # Prevent individual clients from being used in a context manager

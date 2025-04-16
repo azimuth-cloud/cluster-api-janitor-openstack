@@ -203,7 +203,21 @@ async def purge_openstack_resources(
 
         # Delete volumes and snapshots associated with PVCs, unless requested
         # otherwise via the annotation
-        volumeapi = cloud.api_client("volumev3")
+        # NOTE(sd109): DevStack uses 'block-storage' as the Cinder service
+        # type in the catalog which is technically correct and volumev3 is just
+        # a historically valid alias, see:
+        # - https://docs.openstack.org/keystone/latest/contributor/service-catalog.html
+        # - https://service-types.openstack.org/service-types.json
+        # TODO: Make use of https://opendev.org/openstack/os-service-types to improve
+        # service type alias handling?
+        try:
+            volumeapi = cloud.api_client("volumev3")
+        except KeyError:
+            try:
+                volumeapi = cloud.api_client("block-storage")
+            except KeyError:
+                raise openstack.CatalogError("volumev3 or block-storage")
+
         snapshots_detail = volumeapi.resource("snapshots/detail")
         snapshots = volumeapi.resource("snapshots")
         check_snapshots = False
