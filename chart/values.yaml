@@ -1,11 +1,11 @@
-# The default volumes policy for the oeprator
+# The default volumes policy for the operator
 defaultVolumesPolicy: delete
 
 # The image to use for the operator
 image:
   repository: ghcr.io/azimuth-cloud/cluster-api-janitor-openstack
   pullPolicy: IfNotPresent
-  tag: ""  # Defaults to appVersion if not given
+  tag: ""  # Defaults to appVersion if not given
 
 imagePullSecrets: []
 
