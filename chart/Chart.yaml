@@ -2,6 +2,6 @@ apiVersion: v2
 name: cluster-api-janitor-openstack
 description: Helm chart for deploying cluster-api-janitor-openstack.
 type: application
-# The version and appVersion are updated by the chart build script
+# The version and appVersion are updated by the chart build script
 version: 0.1.0
 appVersion: main

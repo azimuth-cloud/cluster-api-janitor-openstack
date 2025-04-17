@@ -6,7 +6,7 @@ created in [OpenStack](https://www.openstack.org/) by the
 and
 [Cinder CSI plugin](https://github.com/kubernetes/cloud-provider-openstack/blob/master/docs/cinder-csi-plugin/using-cinder-csi-plugin.md)
 for Kubernetes clusters created using the
-[Cluster API OpenStack infrastrucutre provider](https://github.com/kubernetes-sigs/cluster-api-provider-openstack).
+[Cluster API OpenStack infrastructure provider](https://github.com/kubernetes-sigs/cluster-api-provider-openstack).
 
 ## Installation
 
