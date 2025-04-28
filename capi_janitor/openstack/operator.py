@@ -206,8 +206,8 @@ async def purge_openstack_resources(
         # a historically valid alias, see:
         # - https://docs.openstack.org/keystone/latest/contributor/service-catalog.html
         # - https://service-types.openstack.org/service-types.json
-        # TODO: Make use of https://opendev.org/openstack/os-service-types to improve
-        # service type alias handling?
+        # TODO(sd109): Make use of https://opendev.org/openstack/os-service-types to
+        # improve service type alias handling?
         try:
             volumeapi = cloud.api_client("volumev3")
         except KeyError:
@@ -270,9 +270,9 @@ async def purge_openstack_resources(
 
 
 async def patch_finalizers(resource, name, namespace, finalizers):
-    """
-    Patches the finalizers of a resource. If the resource does not exist any
-    more, that is classed as a success.
+    """Patches the finalizers of a resource.
+
+    If the resource does not exist anymore, that is classed as a success.
     """
     try:
         await resource.patch(
@@ -288,8 +288,7 @@ async def patch_finalizers(resource, name, namespace, finalizers):
 
 
 def retry_event(handler):
-    """
-    Decorator for retrying events on Kubernetes objects.
+    """Decorator for retrying events on Kubernetes objects.
 
     Instead of retrying within the handler, potentially on stale data, the object is
     annotated with the number of times it has been retried. This triggers a new event
@@ -439,7 +438,8 @@ async def _on_openstackcluster_event_impl(
             await secrets.delete(clouds_secret.metadata.name, namespace=namespace)
             logger.info("cloud credential secret deleted")
         elif remove_appcred:
-            # If the annotation says delete but other controllers are still acting, go round again
+            # If the annotation says delete but other controllers are still acting,
+            # go round again
             raise FinalizerStillPresentError(
                 next(f for f in finalizers if f != FINALIZER), name
             )
