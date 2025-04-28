@@ -8,7 +8,10 @@ from capi_janitor.openstack import operator
 
 class TestOperator(unittest.IsolatedAsyncioTestCase):
 
-    @mock.patch.object(easykube.AsyncClient, "aclose")
-    async def test_operator(self, mock_aclose):
+    async def test_operator(self):
+        mock_easykube = mock.AsyncMock(spec=easykube.AsyncClient)
+        operator.ekclient = mock_easykube
+
         await operator.on_cleanup()
-        mock_aclose.assert_awaited_once()
+
+        mock_easykube.aclose.assert_awaited_once()

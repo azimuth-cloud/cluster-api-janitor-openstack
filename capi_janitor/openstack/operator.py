@@ -13,10 +13,8 @@ import httpx
 
 from . import openstack
 
-
-ekconfig = easykube.Configuration.from_environment()
-ekclient = ekconfig.async_client()
-
+ekconfig = None
+ekclient = None
 
 CAPO_API_GROUP = "infrastructure.cluster.x-k8s.io"
 FINALIZER = "janitor.capi.stackhpc.com"
@@ -32,6 +30,14 @@ CREDENTIAL_ANNOTATION_DELETE = "delete"
 
 RETRY_ANNOTATION = "janitor.capi.stackhpc.com/retry"
 RETRY_DEFAULT_DELAY = int(os.environ.get("CAPI_JANITOR_RETRY_DEFAULT_DELAY", "60"))
+
+
+@kopf.on.startup()
+async def on_startup(**kwargs):
+    global ekconfig
+    ekconfig = easykube.Configuration.from_environment()
+    global ekclient
+    ekclient = ekconfig.async_client()
 
 
 @kopf.on.cleanup()
