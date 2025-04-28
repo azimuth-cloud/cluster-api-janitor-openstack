@@ -6,6 +6,7 @@ from unittest import mock
 import easykube
 
 from capi_janitor.openstack import operator
+from capi_janitor.openstack import openstack
 
 
 class TestOperator(unittest.IsolatedAsyncioTestCase):
@@ -144,4 +145,44 @@ class TestOperator(unittest.IsolatedAsyncioTestCase):
                 mock.call("cloud credential secret deleted"),
                 mock.call("removed janitor finalizer from cluster"),
             ]
+        )
+
+    @mock.patch.object(openstack.Cloud, "from_clouds")
+    async def test_purge_openstack_resources_raises(self, mock_from_clouds):
+        mock_from_clouds.return_value = mock.AsyncMock()
+        mock_networkapi = mock.AsyncMock()
+        mock_networkapi.resource.side_effect = lambda resource: resource
+        async with mock_from_clouds() as mock_cloud:
+            mock_cloud.is_authenticated = False
+            mock_cloud.current_user_id = "user"
+            mock_cloud.api_client.return_value = mock_networkapi
+        logger = mock.Mock()
+        clouds_yaml_data = {
+            "clouds": {
+                "openstack": {
+                    "auth": {
+                        "auth_url": "https://example.com:5000/v3",
+                        "application_credential_id": "user",
+                        "application_credential_secret": "pass",
+                    },
+                    "region_name": "RegionOne",
+                    "interface": "public",
+                    "identity_api_version": 3,
+                    "auth_type": "v3applicationcredential",
+                }
+            }
+        }
+        with self.assertRaises(openstack.AuthenticationError) as e:
+            await operator.purge_openstack_resources(
+                logger,
+                clouds_yaml_data,
+                "openstack",
+                None,
+                "mycluster",
+                True,
+                False,
+            )
+        self.assertEqual(
+            str(e.exception),
+            "failed to authenticate as user: user",
         )
