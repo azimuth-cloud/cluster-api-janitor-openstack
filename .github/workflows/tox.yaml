@@ -1,9 +1,7 @@
 name: Tox unit tests
 
 on:
-  pull_request:
-    branches:
-      - main
+  pull_request:  # todo remove before merge
   workflow_call:
     inputs:
       ref:
