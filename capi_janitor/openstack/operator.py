@@ -350,12 +350,20 @@ def retry_event(handler):
 async def on_openstackcluster_event(
     name, namespace, meta, labels, spec, logger, **kwargs
 ):
+    _on_openstackcluster_event_impl(
+        name, namespace, meta, labels, spec, logger, **kwargs
+    )
+
+
+async def _on_openstackcluster_event_impl(
+    name, namespace, meta, labels, spec, logger, **kwargs
+):
     """
     Executes whenever an event occurs for an OpenStack cluster.
     """
     # Get the resource for manipulating OpenStackClusters at the preferred version
-    capoapi = await ekclient.api_preferred_version(CAPO_API_GROUP)
-    openstackclusters = await capoapi.resource("openstackclusters")
+    openstackclusters = await _get_os_cluster_client()
+
     # Use the value of the `cluster.x-k8s.io/cluster-name` label as the cluster name if it exists,
     # otherwise, fall back to the OpenStackCluster resource name.
     clustername = labels.get("cluster.x-k8s.io/cluster-name", name)
@@ -376,6 +384,7 @@ async def on_openstackcluster_event(
 
     # If our finalizer is not present, we don't do anything
     if FINALIZER not in finalizers:
+        logger.info("janitor finalizer not present, skipping cleanup")
         return
 
     # Get the cloud credential from the cluster and use it to delete dangling
@@ -440,3 +449,9 @@ async def on_openstackcluster_event(
         openstackclusters, name, namespace, [f for f in finalizers if f != FINALIZER]
     )
     logger.info("removed janitor finalizer from cluster")
+
+
+async def _get_os_cluster_client():
+    capoapi = await ekclient.api_preferred_version(CAPO_API_GROUP)
+    openstackclusters = await capoapi.resource("openstackclusters")
+    return openstackclusters
