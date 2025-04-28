@@ -140,5 +140,8 @@ class TestOperator(unittest.IsolatedAsyncioTestCase):
             [mock.call("cluster name that will be used for cleanup: 'mycluster'")]
         )
         logger.info.assert_has_calls(
-            [mock.call("janitor finalizer not present, skipping cleanup")]
+            [
+                mock.call("cloud credential secret deleted"),
+                mock.call("removed janitor finalizer from cluster"),
+            ]
         )
