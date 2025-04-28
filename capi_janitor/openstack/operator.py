@@ -110,7 +110,11 @@ async def volumes_for_cluster(resource, cluster):
     async for vol in resource.list():
         # CSI Cinder sets metadata on the volumes that we can look for
         owner = vol.metadata.get("cinder.csi.openstack.org/cluster")
-        if owner and owner == cluster:
+        # Skip volumes with the keep property set to true
+        if (
+            owner and owner == cluster and
+            vol.metadata.get("janitor.capi.azimuth-cloud.com/keep") != "true"
+        ):
             yield vol
 
 
