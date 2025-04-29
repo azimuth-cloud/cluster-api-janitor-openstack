@@ -183,7 +183,7 @@ class TestOperator(unittest.IsolatedAsyncioTestCase):
 
         mock_volumes_resource.list.return_value = _list_volumes()
         # Act
-        filtered_volumes = [v async for v in  operator.volumes_for_cluster(mock_volumes_resource, "cluster-1")]
+        filtered_volumes = [v async for v in  operator.filtered_volumes_for_cluster(mock_volumes_resource, "cluster-1")]
         # Assert
         self.assertEqual(len(filtered_volumes), 1)
         self.assertEqual(filtered_volumes[0].get("name"), "volume-1")

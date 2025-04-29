@@ -108,7 +108,7 @@ async def secgroups_for_cluster(resource, cluster):
         yield sg
 
 
-async def volumes_for_cluster(resource, cluster):
+async def filtered_volumes_for_cluster(resource, cluster):
     """
     Async iterator for volumes belonging to the specified cluster.
     """
@@ -238,7 +238,7 @@ async def purge_openstack_resources(
             )
             logger.info("deleted snapshots for persistent volume claims")
             check_volumes = await try_delete(
-                logger, volumes, volumes_for_cluster(volumes_detail, name)
+                logger, volumes, filtered_volumes_for_cluster(volumes_detail, name)
             )
             logger.info("deleted volumes for persistent volume claims")
 
@@ -249,7 +249,7 @@ async def purge_openstack_resources(
             raise ResourcesStillPresentError("loadbalancers", name)
         if check_secgroups and not await empty(secgroups_for_cluster(secgroups, name)):
             raise ResourcesStillPresentError("security-groups", name)
-        if check_volumes and not await empty(volumes_for_cluster(volumes_detail, name)):
+        if check_volumes and not await empty(filtered_volumes_for_cluster(volumes_detail, name)):
             raise ResourcesStillPresentError("volumes", name)
         if check_snapshots and not await empty(
             snapshots_for_cluster(snapshots_detail, name)
