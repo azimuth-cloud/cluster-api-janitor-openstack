@@ -73,11 +73,11 @@ jobs:
       - name: Provision Azimuth
         uses: azimuth-cloud/azimuth-config/.github/actions/provision@devel
 
-      # # Run the tests
+      # Run the tests
       - name: Run Azimuth tests
         uses: azimuth-cloud/azimuth-config/.github/actions/test@devel
 
-      # Tear down the environment
+      # Tear down the environment
       - name: Destroy Azimuth
         uses: azimuth-cloud/azimuth-config/.github/actions/destroy@devel
         if: ${{ always() }}
