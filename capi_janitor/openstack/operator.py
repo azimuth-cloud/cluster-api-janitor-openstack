@@ -388,14 +388,13 @@ async def _on_openstackcluster_event_impl(
 
     # Get the cloud credential from the cluster and use it to delete dangling
     # resources created by OpenStack integrations on the cluster
-    secrets = await ekclient.api("v1").resource("secrets")
-    try:
-        clouds_secret = await secrets.fetch(
-            spec["identityRef"]["name"], namespace=namespace
-        )
-    except easykube.ApiError as exc:
-        if exc.status_code != 404:
-            raise
+    clouds_secret = await _get_clouds_secret(
+        spec["identityRef"]["name"], namespace=namespace
+    )
+    if clouds_secret is None:
+        # TODO(johngarbutt): fail better when secret not found?
+        logger.error(f"clouds.yaml not found for: {clustername}")
+
     else:
         clouds = yaml.safe_load(base64.b64decode(clouds_secret.data["clouds.yaml"]))
         if "cacert" in clouds_secret.data:
@@ -423,6 +422,7 @@ async def _on_openstackcluster_event_impl(
             CREDENTIAL_ANNOTATION
         )
         remove_appcred = credential_annotation_value == CREDENTIAL_ANNOTATION_DELETE
+
         await purge_openstack_resources(
             logger,
             clouds,
@@ -435,7 +435,7 @@ async def _on_openstackcluster_event_impl(
         # If we get to here, OpenStack resources have been successfully deleted
         # So we can remove the appcred secret if we are the last actor
         if remove_appcred and len(finalizers) == 1:
-            await secrets.delete(clouds_secret.metadata.name, namespace=namespace)
+            await _delete_secret(clouds_secret.metadata["name"], namespace)
             logger.info("cloud credential secret deleted")
         elif remove_appcred:
             # If the annotation says delete but other controllers are still acting,
@@ -451,7 +451,22 @@ async def _on_openstackcluster_event_impl(
     logger.info("removed janitor finalizer from cluster")
 
 
+async def _delete_secret(name, namespace):
+    secrets = await ekclient.api("v1").resource("secrets")
+    await secrets.delete(name, namespace=namespace)
+
+
 async def _get_os_cluster_client():
     capoapi = await ekclient.api_preferred_version(CAPO_API_GROUP)
     openstackclusters = await capoapi.resource("openstackclusters")
     return openstackclusters
+
+
+async def _get_clouds_secret(secret_name, namespace):
+    secrets = await ekclient.api("v1").resource("secrets")
+    try:
+        return await secrets.fetch(secret_name, namespace=namespace)
+    except easykube.ApiError as exc:
+        if exc.status_code != 404:
+            raise
+        # TODO(johngarbutt): fail better when not found?
