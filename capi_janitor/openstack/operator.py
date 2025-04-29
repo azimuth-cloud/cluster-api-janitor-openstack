@@ -249,7 +249,9 @@ async def purge_openstack_resources(
             raise ResourcesStillPresentError("loadbalancers", name)
         if check_secgroups and not await empty(secgroups_for_cluster(secgroups, name)):
             raise ResourcesStillPresentError("security-groups", name)
-        if check_volumes and not await empty(filtered_volumes_for_cluster(volumes_detail, name)):
+        if check_volumes and not await empty(
+            filtered_volumes_for_cluster(volumes_detail, name)
+        ):
             raise ResourcesStillPresentError("volumes", name)
         if check_snapshots and not await empty(
             snapshots_for_cluster(snapshots_detail, name)
