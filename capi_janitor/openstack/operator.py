@@ -34,7 +34,8 @@ RETRY_DEFAULT_DELAY = int(os.environ.get("CAPI_JANITOR_RETRY_DEFAULT_DELAY", "60
 # The property on the OpenStack volume resource which, if set to 'true',
 # will instruct the Janitor to ignore this volume when cleaning up cluster
 # resources.
-OPENSTACK_USER_VOLUMES_RECLAIM_PROPERTY="janitor.capi.azimuth-cloud.com/keep"
+OPENSTACK_USER_VOLUMES_RECLAIM_PROPERTY = "janitor.capi.azimuth-cloud.com/keep"
+
 
 @kopf.on.startup()
 async def on_startup(**kwargs):
