@@ -1,7 +1,7 @@
 import base64
-import yaml
 import unittest
 from unittest import mock
+import yaml
 
 import easykube
 
