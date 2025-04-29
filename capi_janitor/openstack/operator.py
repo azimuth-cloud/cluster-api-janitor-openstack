@@ -31,6 +31,10 @@ CREDENTIAL_ANNOTATION_DELETE = "delete"
 RETRY_ANNOTATION = "janitor.capi.stackhpc.com/retry"
 RETRY_DEFAULT_DELAY = int(os.environ.get("CAPI_JANITOR_RETRY_DEFAULT_DELAY", "60"))
 
+# The property on the OpenStack volume resource which, if set to 'true',
+# will instruct the Janitor to ignore this volume when cleaning up cluster
+# resources.
+OPENSTACK_USER_VOLUMES_RECLAIM_PROPERTY="janitor.capi.azimuth-cloud.com/keep"
 
 @kopf.on.startup()
 async def on_startup(**kwargs):
@@ -114,7 +118,7 @@ async def volumes_for_cluster(resource, cluster):
         if (
             owner
             and owner == cluster
-            and vol.metadata.get("janitor.capi.azimuth-cloud.com/keep") != "true"
+            and vol.metadata.get(OPENSTACK_USER_VOLUMES_RECLAIM_PROPERTY) != "true"
         ):
             yield vol
 
