@@ -9,7 +9,6 @@ from capi_janitor.openstack import operator
 
 
 class TestOperator(unittest.IsolatedAsyncioTestCase):
-
     async def test_operator(self):
         mock_easykube = mock.AsyncMock(spec=easykube.AsyncClient)
         operator.ekclient = mock_easykube
