@@ -149,13 +149,18 @@ class TestOperator(unittest.IsolatedAsyncioTestCase):
 
     @mock.patch.object(openstack.Cloud, "from_clouds")
     async def test_purge_openstack_resources_raises(self, mock_from_clouds):
-        mock_from_clouds.return_value = mock.AsyncMock()
+
         mock_networkapi = mock.AsyncMock()
         mock_networkapi.resource.side_effect = lambda resource: resource
-        async with mock_from_clouds() as mock_cloud:
-            mock_cloud.is_authenticated = False
-            mock_cloud.current_user_id = "user"
-            mock_cloud.api_client.return_value = mock_networkapi
+
+        mock_cloud = mock.AsyncMock()
+        mock_cloud.__aenter__.return_value = mock_cloud
+        mock_cloud.is_authenticated = False
+        mock_cloud.current_user_id = "user"
+        mock_cloud.api_client.return_value = mock_networkapi
+
+        mock_from_clouds.return_value = mock_cloud
+
         logger = mock.Mock()
         clouds_yaml_data = {
             "clouds": {
@@ -186,3 +191,82 @@ class TestOperator(unittest.IsolatedAsyncioTestCase):
             str(e.exception),
             "failed to authenticate as user: user",
         )
+
+    @mock.patch.object(openstack.Cloud, "from_clouds")
+    async def test_purge_openstack_resources_success(self, mock_from_clouds):
+        # Mocking the cloud object and API clients
+        mock_cloud = mock.AsyncMock()
+        mock_networkapi = mock.AsyncMock()
+        mock_lbapi = mock.AsyncMock()
+        mock_volumeapi = mock.AsyncMock()
+        mock_identityapi = mock.AsyncMock()
+
+        # Mock the __aenter__ to return the mock_cloud when using the async context manager
+        mock_cloud.__aenter__.return_value = mock_cloud
+        mock_cloud.is_authenticated = True
+        mock_cloud.current_user_id = "user"
+        mock_cloud.api_client.return_value = mock_networkapi
+
+        # Return mock clients for different services when requested
+        mock_from_clouds.return_value = mock_cloud
+
+        # Mocking the resources for Network, Load Balancer, and Volume APIs
+        mock_networkapi.resource.side_effect = lambda resource: {
+            "floatingips": mock.AsyncMock(),
+            "security-groups": mock.AsyncMock(),
+        }.get(resource, None)
+
+        mock_lbapi.resource.side_effect = lambda resource: {
+            "loadbalancers": mock.AsyncMock(),
+        }.get(resource, None)
+
+        mock_volumeapi.resource.side_effect = lambda resource: {
+            "snapshots/detail": mock.AsyncMock(),
+            "snapshots": mock.AsyncMock(),
+            "volumes/detail": mock.AsyncMock(),
+            "volumes": mock.AsyncMock(),
+        }.get(resource, None)
+
+        mock_identityapi.resource.side_effect = lambda resource: {
+            "application_credentials": mock.AsyncMock(),
+        }.get(resource, None)
+
+        # Mock logger
+        logger = mock.Mock()
+
+        clouds_yaml_data = {
+            "clouds": {
+                "openstack": {
+                    "auth": {
+                        "auth_url": "https://example.com:5000/v3",
+                        "application_credential_id": "user",
+                        "application_credential_secret": "pass",
+                    },
+                    "region_name": "RegionOne",
+                    "interface": "public",
+                    "identity_api_version": 3,
+                    "auth_type": "v3applicationcredential",
+                }
+            }
+        }
+
+        # Simulate the purge_openstack_resources method behavior
+        await operator.purge_openstack_resources(
+            logger,
+            clouds_yaml_data,  # Pass the mock cloud config
+            "openstack",
+            None,
+            "mycluster",
+            True,
+            False,
+        )
+
+        # Add assertions here based on expected behavior
+        # Example: Check that the resources were interacted with
+        mock_networkapi.resource.assert_any_call("floatingips")
+        mock_lbapi.resource.assert_any_call("loadbalancers")
+        mock_volumeapi.resource.assert_any_call("snapshots")
+        mock_volumeapi.resource.assert_any_call("volumes")
+
+        # Example: Validate if appcred deletion was attempted
+        mock_identityapi.resource.assert_any_call("application_credentials")
