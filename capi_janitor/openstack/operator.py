@@ -103,7 +103,7 @@ async def secgroups_for_cluster(resource, cluster):
         yield sg
 
 
-async def volumes_for_cluster(resource, cluster):
+async def filtered_volumes_for_cluster(resource, cluster):
     """Async iterator for volumes belonging to the specified cluster."""
 
     async for vol in resource.list():
