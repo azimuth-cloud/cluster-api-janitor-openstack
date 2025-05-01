@@ -12,20 +12,25 @@ class UnsupportedAuthenticationError(Exception):
     """
     Raised when an unsupported authentication method is used.
     """
+
     def __init__(self, auth_type):
         super().__init__(f"unsupported authentication type: {auth_type}")
+
 
 class AuthenticationError(Exception):
     """
     Raised when an unknown authentication error is encountered.
     """
+
     def __init__(self, user):
         super().__init__(f"failed to authenticate as user: {user}")
+
 
 class CatalogError(Exception):
     """
     Raised when an unknown catalog service type is requested.
     """
+
     def __init__(self, name):
         super().__init__(f"service type {name} not found in OpenStack service catalog")
 
@@ -34,7 +39,10 @@ class Auth(httpx.Auth):
     """
     Authenticator class for OpenStack connections.
     """
-    def __init__(self, auth_url, application_credential_id, application_credential_secret):
+
+    def __init__(
+        self, auth_url, application_credential_id, application_credential_secret
+    ):
         self.url = auth_url
         self._application_credential_id = application_credential_id
         self._application_credential_secret = application_credential_secret
@@ -58,7 +66,7 @@ class Auth(httpx.Auth):
         return httpx.Request(
             "POST",
             f"{self.url}/v3/auth/tokens",
-            json = {
+            json={
                 "auth": {
                     "identity": {
                         "methods": ["application_credential"],
@@ -68,7 +76,7 @@ class Auth(httpx.Auth):
                         },
                     },
                 },
-            }
+            },
         )
 
     def _handle_token_response(self, response):
@@ -82,7 +90,7 @@ class Auth(httpx.Auth):
                 response = yield self._build_token_request()
                 await response.aread()
                 self._handle_token_response(response)
-        request.headers['X-Auth-Token'] = self._token
+        request.headers["X-Auth-Token"] = self._token
         response = yield request
 
 
@@ -90,7 +98,8 @@ class Resource(rest.Resource):
     """
     Base resource for OpenStack APIs.
     """
-    def __init__(self, client, name, prefix = None, plural_name = None, singular_name = None):
+
+    def __init__(self, client, name, prefix=None, plural_name=None, singular_name=None):
         super().__init__(client, name, prefix)
         # Some resources support a /detail endpoint
         # In this case, we just want to use the name up to the slash as the plural name
@@ -114,7 +123,7 @@ class Resource(rest.Resource):
                 for link in response.json().get(f"{self._plural_name}_links", [])
                 if link["rel"] == "next"
             ),
-            None
+            None,
         )
         # Sometimes, the returned URLs have http where they should have https
         # To mitigate this, we split the URL and return the path and params separately
@@ -134,16 +143,19 @@ class Client(rest.AsyncClient):
     """
     Client for OpenStack APIs.
     """
-    def __init__(self, /, base_url, prefix = None, **kwargs):
+
+    def __init__(self, /, base_url, prefix=None, **kwargs):
         # Extract the path part of the base_url
         url = urllib.parse.urlsplit(base_url)
         # Initialise the client with the scheme/host
-        super().__init__(base_url = f"{url.scheme}://{url.netloc}", **kwargs)
+        super().__init__(base_url=f"{url.scheme}://{url.netloc}", **kwargs)
         # If another prefix is not given, use the path from the base URL as the prefix,
         # otherwise combine the prefixes and remove duplicated path sections.
         # This ensures things like pagination work nicely without duplicating the prefix
         if prefix:
-            self._prefix = "/".join([url.path.rstrip("/"), prefix.lstrip("/").lstrip(url.path)])
+            self._prefix = "/".join(
+                [url.path.rstrip("/"), prefix.lstrip("/").lstrip(url.path)]
+            )
         else:
             self._prefix = url.path
 
@@ -151,7 +163,7 @@ class Client(rest.AsyncClient):
         # Prevent individual clients from being used in a context manager
         raise RuntimeError("clients must be used via a cloud object")
 
-    def resource(self, name, prefix = None, plural_name = None, singular_name = None):
+    def resource(self, name, prefix=None, plural_name=None, singular_name=None):
         # If an additional prefix is given, combine it with the existing prefix
         if prefix:
             prefix = "/".join([self._prefix.rstrip("/"), prefix.lstrip("/")])
@@ -164,7 +176,8 @@ class Cloud:
     """
     Object for interacting with OpenStack clouds.
     """
-    def __init__(self, auth, transport, interface, region = None):
+
+    def __init__(self, auth, transport, interface, region=None):
         self._auth = auth
         self._transport = transport
         self._interface = interface
@@ -176,7 +189,9 @@ class Cloud:
     async def __aenter__(self):
         await self._transport.__aenter__()
         # Once the transport has been initialised, we can initialise the endpoints
-        client = Client(base_url = self._auth.url, auth = self._auth, transport = self._transport)
+        client = Client(
+            base_url=self._auth.url, auth=self._auth, transport=self._transport
+        )
         try:
             response = await client.get("/v3/auth/catalog")
         except httpx.HTTPStatusError as exc:
@@ -190,8 +205,8 @@ class Cloud:
                 ep["url"]
                 for ep in entry["endpoints"]
                 if (
-                    ep["interface"] == self._interface and
-                    (not self._region or ep["region"] == self._region)
+                    ep["interface"] == self._interface
+                    and (not self._region or ep["region"] == self._region)
                 )
             )
             for entry in response.json()["catalog"]
@@ -223,16 +238,16 @@ class Cloud:
         """
         return list(self._endpoints.keys())
 
-    def api_client(self, name, prefix = None):
+    def api_client(self, name, prefix=None):
         """
         Returns a client for the named API.
         """
         if name not in self._clients:
             self._clients[name] = Client(
-                base_url = self._endpoints[name],
-                prefix = prefix,
-                auth = self._auth,
-                transport = self._transport
+                base_url=self._endpoints[name],
+                prefix=prefix,
+                auth=self._auth,
+                transport=self._transport,
             )
         return self._clients[name]
 
@@ -245,13 +260,13 @@ class Cloud:
         auth = Auth(
             auth_url,
             config["auth"]["application_credential_id"],
-            config["auth"]["application_credential_secret"]
+            config["auth"]["application_credential_secret"],
         )
         region = config.get("region_name")
         # Create a default context using the verification from the config
-        context = httpx.create_ssl_context(verify = config.get("verify", True))
+        context = httpx.create_ssl_context(verify=config.get("verify", True))
         # If a cacert was given, load it into the context
         if cacert is not None:
-            context.load_verify_locations(cadata = cacert)
-        transport = httpx.AsyncHTTPTransport(verify = context)
+            context.load_verify_locations(cadata=cacert)
+        transport = httpx.AsyncHTTPTransport(verify=context)
         return cls(auth, transport, config.get("interface", "public"), region)

@@ -8,15 +8,13 @@ import string
 import kopf
 import yaml
 
-import easykube
+import easykube  # type: ignore
 import httpx
 
 from . import openstack
 
-
-ekconfig = easykube.Configuration.from_environment()
-ekclient = ekconfig.async_client()
-
+ekconfig = None
+ekclient = None
 
 CAPO_API_GROUP = "infrastructure.cluster.x-k8s.io"
 FINALIZER = "janitor.capi.stackhpc.com"
@@ -24,8 +22,7 @@ FINALIZER = "janitor.capi.stackhpc.com"
 VOLUMES_ANNOTATION = "janitor.capi.stackhpc.com/volumes-policy"
 VOLUMES_ANNOTATION_DELETE = "delete"
 VOLUMES_ANNOTATION_DEFAULT = os.environ.get(
-    "CAPI_JANITOR_DEFAULT_VOLUMES_POLICY",
-    VOLUMES_ANNOTATION_DELETE
+    "CAPI_JANITOR_DEFAULT_VOLUMES_POLICY", VOLUMES_ANNOTATION_DELETE
 )
 
 CREDENTIAL_ANNOTATION = "janitor.capi.stackhpc.com/credential-policy"
@@ -33,6 +30,19 @@ CREDENTIAL_ANNOTATION_DELETE = "delete"
 
 RETRY_ANNOTATION = "janitor.capi.stackhpc.com/retry"
 RETRY_DEFAULT_DELAY = int(os.environ.get("CAPI_JANITOR_RETRY_DEFAULT_DELAY", "60"))
+
+# The property on the OpenStack volume resource which, if set to 'true',
+# will instruct the Janitor to ignore this volume when cleaning up cluster
+# resources.
+OPENSTACK_USER_VOLUMES_RECLAIM_PROPERTY = "janitor.capi.azimuth-cloud.com/keep"
+
+
+@kopf.on.startup()
+async def on_startup(**kwargs):
+    global ekconfig
+    ekconfig = easykube.Configuration.from_environment()
+    global ekclient
+    ekclient = ekconfig.async_client()
 
 
 @kopf.on.cleanup()
@@ -48,6 +58,7 @@ class FinalizerStillPresentError(Exception):
     """
     Raised when a finalizer from another controller is preventing us from deleting an appcred.
     """
+
     def __init__(self, finalizer, cluster):
         super().__init__(f"finalizer '{finalizer}' still present for cluster {cluster}")
 
@@ -57,6 +68,7 @@ class ResourcesStillPresentError(Exception):
     Raised when cluster resources are still present even after being deleted,
     e.g. while waiting for deletion.
     """
+
     def __init__(self, resource, cluster):
         super().__init__(f"{resource} still present for cluster {cluster}")
 
@@ -66,7 +78,9 @@ async def fips_for_cluster(resource, cluster):
     Async iterator for FIPs belonging to the specified cluster.
     """
     async for fip in resource.list():
-        if not fip.description.startswith("Floating IP for Kubernetes external service"):
+        if not fip.description.startswith(
+            "Floating IP for Kubernetes external service"
+        ):
             continue
         if not fip.description.endswith(f"from cluster {cluster}"):
             continue
@@ -94,14 +108,19 @@ async def secgroups_for_cluster(resource, cluster):
         yield sg
 
 
-async def volumes_for_cluster(resource, cluster):
+async def filtered_volumes_for_cluster(resource, cluster):
     """
     Async iterator for volumes belonging to the specified cluster.
     """
     async for vol in resource.list():
         # CSI Cinder sets metadata on the volumes that we can look for
         owner = vol.metadata.get("cinder.csi.openstack.org/cluster")
-        if owner and owner == cluster:
+        # Skip volumes with the keep property set to true
+        if (
+            owner
+            and owner == cluster
+            and vol.metadata.get(OPENSTACK_USER_VOLUMES_RECLAIM_PROPERTY) != "true"
+        ):
             yield vol
 
 
@@ -151,13 +170,7 @@ async def try_delete(logger, resource, instances, **kwargs):
 
 
 async def purge_openstack_resources(
-    logger,
-    clouds,
-    cloud_name,
-    cacert,
-    name,
-    include_volumes,
-    include_appcred
+    logger, clouds, cloud_name, cacert, name, include_volumes, include_appcred
 ):
     """
     Cleans up the OpenStack resources created by the OCCM and CSI for a cluster.
@@ -185,19 +198,14 @@ async def purge_openstack_resources(
         lbapi = cloud.api_client("load-balancer", "/v2/lbaas/")
         loadbalancers = lbapi.resource("loadbalancers")
         check_lbs = await try_delete(
-            logger,
-            loadbalancers,
-            lbs_for_cluster(loadbalancers, name),
-            cascade = "true"
+            logger, loadbalancers, lbs_for_cluster(loadbalancers, name), cascade="true"
         )
         logger.info("deleted load balancers for LoadBalancer services")
 
         # Delete any security groups associated with loadbalancer services for the cluster
         secgroups = networkapi.resource("security-groups")
         check_secgroups = await try_delete(
-            logger,
-            secgroups,
-            secgroups_for_cluster(secgroups, name)
+            logger, secgroups, secgroups_for_cluster(secgroups, name)
         )
         logger.info("deleted security groups for LoadBalancer services")
 
@@ -226,15 +234,11 @@ async def purge_openstack_resources(
         check_volumes = False
         if include_volumes:
             check_snapshots = await try_delete(
-                logger,
-                snapshots,
-                snapshots_for_cluster(snapshots_detail, name)
+                logger, snapshots, snapshots_for_cluster(snapshots_detail, name)
             )
             logger.info("deleted snapshots for persistent volume claims")
             check_volumes = await try_delete(
-                logger,
-                volumes,
-                volumes_for_cluster(volumes_detail, name)
+                logger, volumes, filtered_volumes_for_cluster(volumes_detail, name)
             )
             logger.info("deleted volumes for persistent volume claims")
 
@@ -245,9 +249,13 @@ async def purge_openstack_resources(
             raise ResourcesStillPresentError("loadbalancers", name)
         if check_secgroups and not await empty(secgroups_for_cluster(secgroups, name)):
             raise ResourcesStillPresentError("security-groups", name)
-        if check_volumes and not await empty(volumes_for_cluster(volumes_detail, name)):
+        if check_volumes and not await empty(
+            filtered_volumes_for_cluster(volumes_detail, name)
+        ):
             raise ResourcesStillPresentError("volumes", name)
-        if check_snapshots and not await empty(snapshots_for_cluster(snapshots_detail, name)):
+        if check_snapshots and not await empty(
+            snapshots_for_cluster(snapshots_detail, name)
+        ):
             raise ResourcesStillPresentError("snapshots", name)
 
         # Now we have finished deleting resources, try to delete the appcred itself
@@ -258,9 +266,11 @@ async def purge_openstack_resources(
             appcreds = identityapi.resource(
                 "application_credentials",
                 # appcreds are user-namespaced
-                prefix = f"users/{cloud.current_user_id}"
+                prefix=f"users/{cloud.current_user_id}",
             )
-            appcred_id = clouds["clouds"]["openstack"]["auth"]["application_credential_id"]
+            appcred_id = clouds["clouds"]["openstack"]["auth"][
+                "application_credential_id"
+            ]
             try:
                 await appcreds.delete(appcred_id)
             except httpx.HTTPStatusError as exc:
@@ -278,15 +288,13 @@ async def patch_finalizers(resource, name, namespace, finalizers):
     """
     try:
         await resource.patch(
-            name,
-            { "metadata": { "finalizers": finalizers } },
-            namespace = namespace
+            name, {"metadata": {"finalizers": finalizers}}, namespace=namespace
         )
     except easykube.ApiError as exc:
         # Patching the finalizers can result in a 422 if we are deleting and CAPO
         # has removed its finalizer while we were working
         if exc.status_code == 422:
-            raise kopf.TemporaryError("error patching finalizers", delay = 1)
+            raise kopf.TemporaryError("error patching finalizers", delay=1)
         elif exc.status_code != 404:
             raise
 
@@ -303,6 +311,7 @@ def retry_event(handler):
     may result in the handler being called twice if an update happens between a failure
     and the associated retry.
     """
+
     @functools.wraps(handler)
     async def wrapper(**kwargs):
         body = kwargs["body"]
@@ -313,7 +322,9 @@ def retry_event(handler):
             if isinstance(exc, kopf.TemporaryError):
                 kwargs["logger"].warn(str(exc))
                 backoff = exc.delay
-            elif isinstance(exc, (FinalizerStillPresentError, ResourcesStillPresentError)):
+            elif isinstance(
+                exc, (FinalizerStillPresentError, ResourcesStillPresentError)
+            ):
                 kwargs["logger"].warn(str(exc))
                 backoff = 5
             else:
@@ -331,30 +342,40 @@ def retry_event(handler):
                             "annotations": {
                                 RETRY_ANNOTATION: "".join(
                                     random.choices(
-                                        string.ascii_lowercase + string.digits,
-                                        k = 8
+                                        string.ascii_lowercase + string.digits, k=8
                                     )
                                 ),
                             }
                         }
                     },
-                    namespace = kwargs["namespace"]
+                    namespace=kwargs["namespace"],
                 )
             except easykube.ApiError as exc:
                 if exc.status_code != 404:
                     raise
+
     return wrapper
 
 
 @kopf.on.event(CAPO_API_GROUP, "openstackclusters")
 @retry_event
-async def on_openstackcluster_event(name, namespace, meta, labels, spec, logger, **kwargs):
+async def on_openstackcluster_event(
+    name, namespace, meta, labels, spec, logger, **kwargs
+):
+    _on_openstackcluster_event_impl(
+        name, namespace, meta, labels, spec, logger, **kwargs
+    )
+
+
+async def _on_openstackcluster_event_impl(
+    name, namespace, meta, labels, spec, logger, **kwargs
+):
     """
     Executes whenever an event occurs for an OpenStack cluster.
     """
     # Get the resource for manipulating OpenStackClusters at the preferred version
-    capoapi = await ekclient.api_preferred_version(CAPO_API_GROUP)
-    openstackclusters = await capoapi.resource("openstackclusters")
+    openstackclusters = await _get_os_cluster_client()
+
     # Use the value of the `cluster.x-k8s.io/cluster-name` label as the cluster name if it exists,
     # otherwise, fall back to the OpenStackCluster resource name.
     clustername = labels.get("cluster.x-k8s.io/cluster-name", name)
@@ -366,10 +387,7 @@ async def on_openstackcluster_event(name, namespace, meta, labels, spec, logger,
     if not meta.get("deletionTimestamp"):
         if FINALIZER not in finalizers:
             await patch_finalizers(
-                openstackclusters,
-                name,
-                namespace,
-                finalizers + [FINALIZER]
+                openstackclusters, name, namespace, finalizers + [FINALIZER]
             )
             logger.info("added janitor finalizer to cluster")
         return
@@ -378,16 +396,18 @@ async def on_openstackcluster_event(name, namespace, meta, labels, spec, logger,
 
     # If our finalizer is not present, we don't do anything
     if FINALIZER not in finalizers:
+        logger.info("janitor finalizer not present, skipping cleanup")
         return
 
     # Get the cloud credential from the cluster and use it to delete dangling
     # resources created by OpenStack integrations on the cluster
-    secrets = await ekclient.api("v1").resource("secrets")
-    try:
-        clouds_secret = await secrets.fetch(spec["identityRef"]["name"], namespace = namespace)
-    except easykube.ApiError as exc:
-        if exc.status_code != 404:
-            raise
+    clouds_secret = await _get_clouds_secret(
+        spec["identityRef"]["name"], namespace=namespace
+    )
+    if clouds_secret is None:
+        # TODO(johngarbutt): fail better when secret not found?
+        logger.error(f"clouds.yaml not found for: {clustername}")
+
     else:
         clouds = yaml.safe_load(base64.b64decode(clouds_secret.data["clouds.yaml"]))
         if "cacert" in clouds_secret.data:
@@ -396,11 +416,12 @@ async def on_openstackcluster_event(name, namespace, meta, labels, spec, logger,
             cacert = None
         # The cloud name comes from spec.identityRef.cloudName from v1beta1 onwards
         # Prior to that, it comes from spec.cloudName
-        cloud_name = spec["identityRef"].get("cloudName", spec.get("cloudName", "openstack"))
+        cloud_name = spec["identityRef"].get(
+            "cloudName", spec.get("cloudName", "openstack")
+        )
         # The value of this annotation on the cluster decides whether to delete volumes
         volumes_annotation_value = meta.get("annotations", {}).get(
-            VOLUMES_ANNOTATION,
-            VOLUMES_ANNOTATION_DEFAULT
+            VOLUMES_ANNOTATION, VOLUMES_ANNOTATION_DEFAULT
         )
         # We want to remove the appcred iff:
         #
@@ -414,6 +435,7 @@ async def on_openstackcluster_event(name, namespace, meta, labels, spec, logger,
             CREDENTIAL_ANNOTATION
         )
         remove_appcred = credential_annotation_value == CREDENTIAL_ANNOTATION_DELETE
+
         await purge_openstack_resources(
             logger,
             clouds,
@@ -421,22 +443,42 @@ async def on_openstackcluster_event(name, namespace, meta, labels, spec, logger,
             cacert,
             clustername,
             volumes_annotation_value == VOLUMES_ANNOTATION_DELETE,
-            remove_appcred and len(finalizers) == 1
+            remove_appcred and len(finalizers) == 1,
         )
         # If we get to here, OpenStack resources have been successfully deleted
         # So we can remove the appcred secret if we are the last actor
         if remove_appcred and len(finalizers) == 1:
-            await secrets.delete(clouds_secret.metadata.name, namespace = namespace)
+            await _delete_secret(clouds_secret.metadata["name"], namespace)
             logger.info("cloud credential secret deleted")
         elif remove_appcred:
             # If the annotation says delete but other controllers are still acting, go round again
-            raise FinalizerStillPresentError(next(f for f in finalizers if f != FINALIZER), name)
+            raise FinalizerStillPresentError(
+                next(f for f in finalizers if f != FINALIZER), name
+            )
 
     # If we get to here, we can remove the finalizer
     await patch_finalizers(
-        openstackclusters,
-        name,
-        namespace,
-        [f for f in finalizers if f != FINALIZER]
+        openstackclusters, name, namespace, [f for f in finalizers if f != FINALIZER]
     )
     logger.info("removed janitor finalizer from cluster")
+
+
+async def _delete_secret(name, namespace):
+    secrets = await ekclient.api("v1").resource("secrets")
+    await secrets.delete(name, namespace=namespace)
+
+
+async def _get_os_cluster_client():
+    capoapi = await ekclient.api_preferred_version(CAPO_API_GROUP)
+    openstackclusters = await capoapi.resource("openstackclusters")
+    return openstackclusters
+
+
+async def _get_clouds_secret(secret_name, namespace):
+    secrets = await ekclient.api("v1").resource("secrets")
+    try:
+        return await secrets.fetch(secret_name, namespace=namespace)
+    except easykube.ApiError as exc:
+        if exc.status_code != 404:
+            raise
+        # TODO(johngarbutt): fail better when not found?
