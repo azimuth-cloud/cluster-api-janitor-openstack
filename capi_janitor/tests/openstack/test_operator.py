@@ -1,7 +1,7 @@
 import base64
-import yaml
 import unittest
 from unittest import mock
+import yaml
 
 import easykube
 from easykube.rest.util import PropertyDict
@@ -11,7 +11,6 @@ from capi_janitor.openstack.operator import OPENSTACK_USER_VOLUMES_RECLAIM_PROPE
 
 
 class TestOperator(unittest.IsolatedAsyncioTestCase):
-
     async def test_operator(self):
         mock_easykube = mock.AsyncMock(spec=easykube.AsyncClient)
         operator.ekclient = mock_easykube
