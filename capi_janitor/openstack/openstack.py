@@ -193,9 +193,8 @@ class Cloud:
                 continue
 
             for ep in entry["endpoints"]:
-                if (
-                    ep.get("interface") == self._interface
-                    and (not self._region or ep.get("region_id") == self._region)
+                if ep.get("interface") == self._interface and (
+                    not self._region or ep.get("region_id") == self._region
                 ):
                     self._endpoints[entry["type"]] = ep["url"]
                     break

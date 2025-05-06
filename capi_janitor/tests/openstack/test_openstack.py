@@ -1,6 +1,6 @@
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
-from capi_janitor.openstack.openstack import Cloud, Client, AuthenticationError
+from capi_janitor.openstack.openstack import Cloud, AuthenticationError
 
 
 class TestCloudAenter(unittest.IsolatedAsyncioTestCase):
@@ -116,14 +116,7 @@ class TestCloudAenter(unittest.IsolatedAsyncioTestCase):
         mock_client_instance = AsyncMock()
         mock_client.return_value = mock_client_instance
         mock_client_instance.get.return_value.json = MagicMock(
-            return_value={
-                "catalog": [
-                    {
-                        "type": "compute",
-                        "endpoints": []
-                    }
-                ]
-            }
+            return_value={"catalog": [{"type": "compute", "endpoints": []}]}
         )
 
         async with self.cloud as cloud:
