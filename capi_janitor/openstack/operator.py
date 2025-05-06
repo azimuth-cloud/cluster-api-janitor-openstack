@@ -8,13 +8,13 @@ import string
 import kopf
 import yaml
 
-import easykube  # type: ignore
+import easykube
 import httpx
 
 from . import openstack
 
-ekconfig = None
-ekclient = None
+ekconfig: easykube.Configuration
+ekclient: easykube.AsyncClient
 
 CAPO_API_GROUP = "infrastructure.cluster.x-k8s.io"
 FINALIZER = "janitor.capi.stackhpc.com"
