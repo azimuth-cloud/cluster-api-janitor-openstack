@@ -349,7 +349,7 @@ def retry_event(handler):
 async def on_openstackcluster_event(
     name, namespace, meta, labels, spec, logger, **kwargs
 ):
-    _on_openstackcluster_event_impl(
+    await _on_openstackcluster_event_impl(
         name, namespace, meta, labels, spec, logger, **kwargs
     )
 
