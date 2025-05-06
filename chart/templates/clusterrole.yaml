@@ -37,3 +37,12 @@ rules:
       - get
       - watch
       - patch
+    # Required to prevent erroneous error logs during kopf startup
+  - apiGroups:
+      - apiextensions.k8s.io
+    resources:
+      - customresourcedefinitions
+    verbs:
+      - list
+      - get
+      - watch
