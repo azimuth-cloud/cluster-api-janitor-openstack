@@ -23,3 +23,15 @@ builtins = ["_"]
 quote-style = "double"
 indent-style = "space"
 line-ending = "auto"
+
+[tool.ruff.lint]
+select = [
+    # pycodestyle
+    "E",
+    # Pyflakes
+    "F",
+    # flake8-async
+    "ASYNC",
+    # pyupgrade
+    "UP",
+]

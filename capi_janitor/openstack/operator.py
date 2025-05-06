@@ -310,7 +310,7 @@ def retry_event(handler):
                 kwargs["logger"].warn(str(exc))
                 backoff = exc.delay
             elif isinstance(
-                exc, (FinalizerStillPresentError, ResourcesStillPresentError)
+                exc, FinalizerStillPresentError | ResourcesStillPresentError
             ):
                 kwargs["logger"].warn(str(exc))
                 backoff = 5
