@@ -72,12 +72,13 @@ async def fips_for_cluster(resource, cluster):
     """
     Async iterator for FIPs belonging to the specified cluster.
     """
-    async for fip in resource.list():
-        if not fip.description.startswith(
+    fips = await resource.list()
+    async for fip in fips:
+        if not fip["description"].startswith(
             "Floating IP for Kubernetes external service"
         ):
             continue
-        if not fip.description.endswith(f"from cluster {cluster}"):
+        if not fip["description"].endswith(f"from cluster {cluster}"):
             continue
         yield fip
 
