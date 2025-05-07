@@ -15,7 +15,7 @@ class TestOperator(unittest.IsolatedAsyncioTestCase):
         mock_easykube = mock.AsyncMock(spec=easykube.AsyncClient)
         operator.ekclient = mock_easykube
 
-        await operator.on_cleanup()
+        await operator.on_cleanup()  # type: ignore
 
         mock_easykube.aclose.assert_awaited_once_with()
 

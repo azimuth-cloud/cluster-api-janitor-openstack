@@ -319,6 +319,8 @@ def retry_event(handler):
                 # Calculate the backoff
                 backoff = RETRY_DEFAULT_DELAY
             # Wait for the backoff before annotating the resource
+            if backoff is None:
+                backoff = RETRY_DEFAULT_DELAY
             await asyncio.sleep(backoff)
             # Annotate the object with a random value to trigger another event
             try:
