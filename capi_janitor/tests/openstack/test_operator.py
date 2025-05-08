@@ -73,7 +73,7 @@ class TestOperator(unittest.IsolatedAsyncioTestCase):
         result = [
             lb async for lb in operator.lbs_for_cluster(resource_mock, "mycluster")
         ]
-        
+
         self.assertEqual(len(result), 2)
         self.assertEqual(result[0], lbs[0])
         self.assertEqual(result[1], lbs[3])
@@ -279,7 +279,6 @@ class TestOperator(unittest.IsolatedAsyncioTestCase):
 
     @mock.patch.object(openstack.Cloud, "from_clouds")
     async def test_purge_openstack_resources_raises(self, mock_from_clouds):
-
         mock_networkapi = mock.AsyncMock()
         mock_networkapi.resource.side_effect = lambda resource: resource
 
