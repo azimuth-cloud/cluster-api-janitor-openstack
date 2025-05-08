@@ -22,6 +22,16 @@ class AsyncIterList:
         for item in self.items:
             yield item
 
+    def __aiter__(self):
+        self._iter = iter(self.items)
+        return self
+
+    async def __anext__(self):
+        try:
+            return next(self._iter)
+        except StopIteration:
+            raise StopAsyncIteration
+
 
 class TestOperator(unittest.IsolatedAsyncioTestCase):
     async def test_operator(self):
@@ -35,16 +45,10 @@ class TestOperator(unittest.IsolatedAsyncioTestCase):
     async def test_fips_for_cluster(self):
         prefix = "Floating IP for Kubernetes external service from cluster"
         fips = [
-            mock.Mock(
-                description=f"{prefix} mycluster",
-            ),
-            mock.Mock(
-                description=f"{prefix} asdf",
-            ),
+            mock.Mock(description=f"{prefix} mycluster"),
+            mock.Mock(description=f"{prefix} asdf"),
             mock.Mock(description="Some other description"),
-            mock.Mock(
-                description=f"{prefix} mycluster",
-            ),
+            mock.Mock(description=f"{prefix} mycluster"),
         ]
         resource_mock = AsyncIterList(fips)
 
@@ -80,75 +84,72 @@ class TestOperator(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result[1], lbs[3])
 
     async def test_secgroups_for_cluster(self):
+        prefix = "Security Group for Service LoadBalancer in cluster"
         secgroups = [
-            mock.Mock(
-                description="Security Group for Service LoadBalancer in cluster mycluster",
-                id=1,
-            ),
-            mock.Mock(
-                description="Security Group for Service LoadBalancer in cluster othercluster",
-                id=2,
-            ),
-            mock.Mock(description="Other description", id=3),
-            mock.Mock(
-                description="Security Group for Service LoadBalancer in cluster mycluster",
-                id=4,
-            ),
+            mock.Mock(description=f"{prefix} mycluster"),
+            mock.Mock(description=f"{prefix} othercluster"),
+            mock.Mock(description="Other description"),
+            mock.Mock(description=f"{prefix} mycluster"),
         ]
-
-        resource_mock = mock.Mock()
-        resource_mock.list = mock.AsyncMock(return_value=aiter(secgroups))
+        resource_mock = AsyncIterList(secgroups)
 
         result = []
         async for sg in operator.secgroups_for_cluster(resource_mock, "mycluster"):
             result.append(sg)
 
         self.assertEqual(len(result), 2)
-        self.assertEqual(result[0].id, 1)
-        self.assertEqual(result[1].id, 4)
+        self.assertEqual(result[0], secgroups[0])
+        self.assertEqual(result[1], secgroups[3])
 
-    async def test_volumes_and_snapshots_for_cluster(self):
-        # Mock volumes with metadata containing the cluster owner information
-        resources = [
-            mock.Mock(id=1, metadata={"cinder.csi.openstack.org/cluster": "mycluster"}),
-            mock.Mock(
-                id=2, metadata={"cinder.csi.openstack.org/cluster": "othercluster"}
-            ),
-            mock.Mock(id=3, metadata={"cinder.csi.openstack.org/cluster": "mycluster"}),
-            mock.Mock(
-                id=4, metadata={"cinder.csi.openstack.org/cluster": "othercluster"}
-            ),
+    async def test_filtered_volumes_for_cluster(self):
+        volumes = [
+            mock.Mock(metadata={"cinder.csi.openstack.org/cluster": "mycluster"}),
+            mock.Mock(metadata={"cinder.csi.openstack.org/cluster": "othercluster"}),
+            mock.Mock(metadata={"cinder.csi.openstack.org/cluster": "mycluster"}),
+            mock.Mock(metadata={"cinder.csi.openstack.org/cluster": "othercluster"}),
             # Volumes with invalid metadata
-            mock.Mock(id=5, metadata={"another_key": "value"}),
+            mock.Mock(metadata={"another_key": "value"}),
         ]
+        resource_mock = AsyncIterList(volumes)
 
-        resource_mock = mock.Mock()
-        resource_mock.list = mock.AsyncMock(return_value=aiter(resources))
+        result = []
+        async for vol in operator.filtered_volumes_for_cluster(
+            resource_mock, "mycluster"
+        ):
+            result.append(vol)
 
-        volumes_result = []
-        async for vol in operator.volumes_for_cluster(resource_mock, "mycluster"):
-            volumes_result.append(vol)
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0], volumes[0])
+        self.assertEqual(result[1], volumes[2])
 
-        self.assertEqual(len(volumes_result), 2)
-        self.assertEqual(volumes_result[0].id, 1)
-        self.assertEqual(volumes_result[1].id, 3)
+    async def test_snapshots_for_cluster(self):
+        snapshots = [
+            mock.Mock(metadata={"cinder.csi.openstack.org/cluster": "mycluster"}),
+            mock.Mock(metadata={"cinder.csi.openstack.org/cluster": "othercluster"}),
+            mock.Mock(metadata={"cinder.csi.openstack.org/cluster": "mycluster"}),
+            mock.Mock(metadata={"cinder.csi.openstack.org/cluster": "othercluster"}),
+            # Volumes with invalid metadata
+            mock.Mock(metadata={"another_key": "value"}),
+        ]
+        resource_mock = AsyncIterList(snapshots)
 
-        # Reset mock values
-        resource_mock.list = mock.AsyncMock(return_value=aiter(resources))
+        result = []
+        async for snap in operator.snapshots_for_cluster(resource_mock, "mycluster"):
+            result.append(snap)
 
-        snapshots_result = []
-        async for vol in operator.snapshots_for_cluster(resource_mock, "mycluster"):
-            snapshots_result.append(vol)
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0], snapshots[0])
+        self.assertEqual(result[1], snapshots[2])
 
-        self.assertEqual(len(snapshots_result), 2)
-        self.assertEqual(snapshots_result[0].id, 1)
-        self.assertEqual(snapshots_result[1].id, 3)
+    async def test_empty_iterator_returns_true(self):
+        async_iter = AsyncIterList([]).__aiter__()
+        result = await operator.empty(async_iter)
+        self.assertTrue(result)
 
-    async def test_empty_iterator(self):
-        self.assertTrue(await operator.empty(aiter([])))
-
-    async def test_non_empty_iterator(self):
-        self.assertFalse(await operator.empty(aiter([1, 2, 3])))
+    async def test_non_empty_iterator_returns_false(self):
+        async_iter = AsyncIterList([1, 2, 3]).__aiter__()
+        result = await operator.empty(async_iter)
+        self.assertFalse(result)
 
     @mock.patch.object(operator, "patch_finalizers")
     @mock.patch.object(operator, "_get_os_cluster_client")
@@ -331,7 +332,7 @@ class TestOperator(unittest.IsolatedAsyncioTestCase):
     #     mock_volumeapi = mock.AsyncMock()
     #     mock_identityapi = mock.AsyncMock()
 
-    #     # Mock the __aenter__ to return the mock_cloud when using the async context manager
+    #     # Mock the __aenter__ to return the mock_cloud
     #     mock_cloud.__aenter__.return_value = mock_cloud
     #     mock_cloud.is_authenticated = True
     #     mock_cloud.current_user_id = "user"
