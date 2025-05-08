@@ -8,13 +8,13 @@ import string
 import kopf
 import yaml
 
-import easykube  # type: ignore
+import easykube
 import httpx
 
 from . import openstack
 
-ekconfig = None
-ekclient = None
+ekconfig: easykube.Configuration
+ekclient: easykube.AsyncClient
 
 CAPO_API_GROUP = "infrastructure.cluster.x-k8s.io"
 FINALIZER = "janitor.capi.stackhpc.com"
@@ -310,7 +310,7 @@ def retry_event(handler):
                 kwargs["logger"].warn(str(exc))
                 backoff = exc.delay
             elif isinstance(
-                exc, (FinalizerStillPresentError, ResourcesStillPresentError)
+                exc, FinalizerStillPresentError | ResourcesStillPresentError
             ):
                 kwargs["logger"].warn(str(exc))
                 backoff = 5
@@ -319,6 +319,8 @@ def retry_event(handler):
                 # Calculate the backoff
                 backoff = RETRY_DEFAULT_DELAY
             # Wait for the backoff before annotating the resource
+            if backoff is None:
+                backoff = RETRY_DEFAULT_DELAY
             await asyncio.sleep(backoff)
             # Annotate the object with a random value to trigger another event
             try:
