@@ -39,19 +39,19 @@ class TestOperator(unittest.IsolatedAsyncioTestCase):
 
     async def test_fips_for_cluster(self):
         fips = [
-            {
-                "description": "Floating IP for Kubernetes external service from cluster mycluster",
-                "id": 1,
-            },
-            {
-                "description": "Floating IP for Kubernetes external service from cluster othercluster",
-                "id": 2,
-            },
-            {"description": "Some other description", "id": 3},
-            {
-                "description": "Floating IP for Kubernetes external service from cluster mycluster",
-                "id": 4,
-            },
+            mock.Mock(
+                description="Floating IP for Kubernetes external service from cluster mycluster",
+                id=1,
+            ),
+            mock.Mock(
+                description="Floating IP for Kubernetes external service from cluster othercluster",
+                id=2,
+            ),
+            mock.Mock(description="Some other description", id=3),
+            mock.Mock(
+                description="Floating IP for Kubernetes external service from cluster mycluster",
+                id=4,
+            ),
         ]
 
         resource_mock = mock.Mock()
@@ -62,33 +62,102 @@ class TestOperator(unittest.IsolatedAsyncioTestCase):
             result.append(fip)
 
         self.assertEqual(len(result), 2)
-        self.assertEqual(result[0]["id"], 1)
-        self.assertEqual(result[1]["id"], 4)
+        self.assertEqual(result[0].id, 1)
+        self.assertEqual(result[1].id, 4)
 
-    # async def test_lbs_for_cluster(self):
-    #         # Create mock load balancers
-    #         lb1 = mock.Mock(name="lb1", id=1)
-    #         lb1.name = "kube_service_mycluster_api"
+    async def test_lbs_for_cluster(self):
+        lbs = [
+            mock.Mock(name="lb1", id=1),
+            mock.Mock(name="lb2", id=2),
+            mock.Mock(name="lb3", id=3),
+            mock.Mock(name="lb4", id=4),
+        ]
+        lbs[0].name = "kube_service_mycluster_api"
+        lbs[1].name = "kube_service_othercluster_api"
+        lbs[2].name = "fake_service_mycluster_api"
+        lbs[3].name = "kube_service_mycluster_ui"
 
-    #         lb2 = mock.Mock(name="lb2", id=2)
-    #         lb2.name = "kube_service_othercluster_ui"
+        resource_mock = mock.Mock()
+        resource_mock.list = mock.AsyncMock(return_value=aiter(lbs))
 
-    #         lb3 = mock.Mock(name="lb3", id=3)
-    #         lb3.name = "kube_service_mycluster_ui"
+        result = []
+        async for lb in operator.lbs_for_cluster(resource_mock, "mycluster"):
+            result.append(lb)
 
-    #         # Mock resource with async list()
-    #         resource = mock.Mock()
-    #         resource.list.return_value = aiter([lb1, lb2, lb3])
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0].id, 1)
+        self.assertEqual(result[1].id, 4)
 
-    #         # Run the function under test
-    #         result = []
-    #         async for lb in lbs_for_cluster(resource, "mycluster"):
-    #             result.append(lb)
+    async def test_secgroups_for_cluster(self):
+        secgroups = [
+            mock.Mock(
+                description="Security Group for Service LoadBalancer in cluster mycluster",
+                id=1,
+            ),
+            mock.Mock(
+                description="Security Group for Service LoadBalancer in cluster othercluster",
+                id=2,
+            ),
+            mock.Mock(description="Other description", id=3),
+            mock.Mock(
+                description="Security Group for Service LoadBalancer in cluster mycluster",
+                id=4,
+            ),
+        ]
 
-    #         # Assert results
-    #         self.assertEqual(len(result), 2)
-    #         self.assertEqual(result[0].id, 1)
-    #         self.assertEqual(result[1].id, 3)
+        resource_mock = mock.Mock()
+        resource_mock.list = mock.AsyncMock(return_value=aiter(secgroups))
+
+        result = []
+        async for sg in operator.secgroups_for_cluster(resource_mock, "mycluster"):
+            result.append(sg)
+
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0].id, 1)
+        self.assertEqual(result[1].id, 4)
+
+    async def test_volumes_and_snapshots_for_cluster(self):
+        # Mock volumes with metadata containing the cluster owner information
+        resources = [
+            mock.Mock(id=1, metadata={"cinder.csi.openstack.org/cluster": "mycluster"}),
+            mock.Mock(
+                id=2, metadata={"cinder.csi.openstack.org/cluster": "othercluster"}
+            ),
+            mock.Mock(id=3, metadata={"cinder.csi.openstack.org/cluster": "mycluster"}),
+            mock.Mock(
+                id=4, metadata={"cinder.csi.openstack.org/cluster": "othercluster"}
+            ),
+            # Volumes with invalid metadata
+            mock.Mock(id=5, metadata={"another_key": "value"}),
+        ]
+
+        resource_mock = mock.Mock()
+        resource_mock.list = mock.AsyncMock(return_value=aiter(resources))
+
+        volumes_result = []
+        async for vol in operator.volumes_for_cluster(resource_mock, "mycluster"):
+            volumes_result.append(vol)
+
+        self.assertEqual(len(volumes_result), 2)
+        self.assertEqual(volumes_result[0].id, 1)
+        self.assertEqual(volumes_result[1].id, 3)
+
+        # Reset mock values
+        resource_mock.list = mock.AsyncMock(return_value=aiter(resources))
+
+        snapshots_result = []
+        async for vol in operator.snapshots_for_cluster(resource_mock, "mycluster"):
+            snapshots_result.append(vol)
+
+        self.assertEqual(len(snapshots_result), 2)
+        self.assertEqual(snapshots_result[0].id, 1)
+        self.assertEqual(snapshots_result[1].id, 3)
+
+    async def test_empty_iterator(self):
+        self.assertTrue(await operator.empty(aiter([])))
+
+    async def test_non_empty_iterator(self):
+        self.assertFalse(await operator.empty(aiter([1, 2, 3])))
 
     @mock.patch.object(operator, "patch_finalizers")
     @mock.patch.object(operator, "_get_os_cluster_client")

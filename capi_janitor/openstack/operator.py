@@ -69,16 +69,14 @@ class ResourcesStillPresentError(Exception):
 
 
 async def fips_for_cluster(resource, cluster):
-    """
-    Async iterator for FIPs belonging to the specified cluster.
-    """
+    """Async iterator for FIPs belonging to the specified cluster."""
     fips = await resource.list()
     async for fip in fips:
-        if not fip["description"].startswith(
+        if not fip.description.startswith(
             "Floating IP for Kubernetes external service"
         ):
             continue
-        if not fip["description"].endswith(f"from cluster {cluster}"):
+        if not fip.description.endswith(f"from cluster {cluster}"):
             continue
         yield fip
 
@@ -87,7 +85,8 @@ async def lbs_for_cluster(resource, cluster):
     """
     Async iterator for loadbalancers belonging to the specified cluster.
     """
-    async for lb in resource.list():
+    lbs = await resource.list()
+    async for lb in lbs:
         if lb.name.startswith(f"kube_service_{cluster}_"):
             yield lb
 
@@ -96,7 +95,8 @@ async def secgroups_for_cluster(resource, cluster):
     """
     Async iterator for security groups belonging to the specified cluster.
     """
-    async for sg in resource.list():
+    sgs = await resource.list()
+    async for sg in sgs:
         if not sg.description.startswith("Security Group for"):
             continue
         if not sg.description.endswith(f"Service LoadBalancer in cluster {cluster}"):
@@ -108,7 +108,8 @@ async def volumes_for_cluster(resource, cluster):
     """
     Async iterator for volumes belonging to the specified cluster.
     """
-    async for vol in resource.list():
+    vols = await resource.list()
+    async for vol in vols:
         # CSI Cinder sets metadata on the volumes that we can look for
         owner = vol.metadata.get("cinder.csi.openstack.org/cluster")
         if owner and owner == cluster:
@@ -119,7 +120,8 @@ async def snapshots_for_cluster(resource, cluster):
     """
     Async iterator for snapshots belonging to the specified cluster.
     """
-    async for snapshot in resource.list():
+    snapshots = await resource.list()
+    async for snapshot in snapshots:
         # CSI Cinder sets metadata on the volumes that we can look for
         owner = snapshot.metadata.get("cinder.csi.openstack.org/cluster")
         if owner and owner == cluster:
