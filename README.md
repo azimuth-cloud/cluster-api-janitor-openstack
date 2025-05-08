@@ -56,6 +56,21 @@ metadata:
 
 > **NOTE**: Any value other than `delete` means volumes will be kept.
 
+### User-configurable behaviour
+
+Annotations on the Kubernetes resources are only available to administrators with
+access to the Cluster API management cluster's Kubernetes API; therefore, the Janitor
+also provides an alternative user-facing mechanism for marking volumes which should
+not be deleted during cluster clean up. This is done by adding a property to the
+OpenStack volume using:
+
+```
+openstack volume set --property janitor.capi.azimuth-cloud.com/keep='true' <volume-name-or-id>
+```
+
+Any value other than 'true' will result in the volume being deleted when the workload
+cluster is deleted.
+
 ## How it works
 
 `cluster-api-janitor-openstack` watches for `OpenStackCluster`s being created and adds its
@@ -66,7 +81,7 @@ Cluster API `Cluster`, from being removed until the finalizer is removed.
 (specifically, it waits for the `deletionTimestamp` to be set, indicating that a deletion
 has been requested), at which point it uses the credential from
 `OpenStackCluster.spec.identityRef` to remove any dangling resources that were created by
-the OCCM or Cinder CSI with the same cluster name as the cluster being deleted. 
+the OCCM or Cinder CSI with the same cluster name as the cluster being deleted.
 The cluster name is determined by the `cluster.x-k8s.io/cluster-name` label on the
 OpenStackCluster resource, if present.
 If the label is not set, the name of the OpenStackCluster resource (`metadata.name`) is

@@ -8,13 +8,13 @@ import string
 import kopf
 import yaml
 
-import easykube  # type: ignore
+import easykube
 import httpx
 
 from . import openstack
 
-ekconfig = None
-ekclient = None
+ekconfig: easykube.Configuration
+ekclient: easykube.AsyncClient
 
 CAPO_API_GROUP = "infrastructure.cluster.x-k8s.io"
 FINALIZER = "janitor.capi.stackhpc.com"
@@ -30,6 +30,11 @@ CREDENTIAL_ANNOTATION_DELETE = "delete"
 
 RETRY_ANNOTATION = "janitor.capi.stackhpc.com/retry"
 RETRY_DEFAULT_DELAY = int(os.environ.get("CAPI_JANITOR_RETRY_DEFAULT_DELAY", "60"))
+
+# The property on the OpenStack volume resource which, if set to 'true',
+# will instruct the Janitor to ignore this volume when cleaning up cluster
+# resources.
+OPENSTACK_USER_VOLUMES_RECLAIM_PROPERTY = "janitor.capi.azimuth-cloud.com/keep"
 
 
 @kopf.on.startup()
@@ -50,8 +55,9 @@ async def on_cleanup(**kwargs):
 
 
 class FinalizerStillPresentError(Exception):
-    """
-    Raised when a finalizer from another controller is preventing us from deleting an appcred.
+    """Raised when a finalizer from another controller is preventing us from
+
+    deleting an appcred.
     """
 
     def __init__(self, finalizer, cluster):
@@ -59,8 +65,8 @@ class FinalizerStillPresentError(Exception):
 
 
 class ResourcesStillPresentError(Exception):
-    """
-    Raised when cluster resources are still present even after being deleted,
+    """Raised when cluster resources are still present even after being deleted,
+
     e.g. while waiting for deletion.
     """
 
@@ -70,8 +76,7 @@ class ResourcesStillPresentError(Exception):
 
 async def fips_for_cluster(resource, cluster):
     """Async iterator for FIPs belonging to the specified cluster."""
-    fips = await resource.list()
-    async for fip in fips:
+    async for fip in resource.list():
         if not fip.description.startswith(
             "Floating IP for Kubernetes external service"
         ):
@@ -82,21 +87,15 @@ async def fips_for_cluster(resource, cluster):
 
 
 async def lbs_for_cluster(resource, cluster):
-    """
-    Async iterator for loadbalancers belonging to the specified cluster.
-    """
-    lbs = await resource.list()
-    async for lb in lbs:
+    """Async iterator for loadbalancers belonging to the specified cluster."""
+    async for lb in resource.list():
         if lb.name.startswith(f"kube_service_{cluster}_"):
             yield lb
 
 
 async def secgroups_for_cluster(resource, cluster):
-    """
-    Async iterator for security groups belonging to the specified cluster.
-    """
-    sgs = await resource.list()
-    async for sg in sgs:
+    """Async iterator for security groups belonging to the specified cluster."""
+    async for sg in resource.list():
         if not sg.description.startswith("Security Group for"):
             continue
         if not sg.description.endswith(f"Service LoadBalancer in cluster {cluster}"):
@@ -104,24 +103,24 @@ async def secgroups_for_cluster(resource, cluster):
         yield sg
 
 
-async def volumes_for_cluster(resource, cluster):
-    """
-    Async iterator for volumes belonging to the specified cluster.
-    """
-    vols = await resource.list()
-    async for vol in vols:
+async def filtered_volumes_for_cluster(resource, cluster):
+    """Async iterator for volumes belonging to the specified cluster."""
+
+    async for vol in resource.list():
         # CSI Cinder sets metadata on the volumes that we can look for
         owner = vol.metadata.get("cinder.csi.openstack.org/cluster")
-        if owner and owner == cluster:
+        # Skip volumes with the keep property set to true
+        if (
+            owner
+            and owner == cluster
+            and vol.metadata.get(OPENSTACK_USER_VOLUMES_RECLAIM_PROPERTY) != "true"
+        ):
             yield vol
 
 
 async def snapshots_for_cluster(resource, cluster):
-    """
-    Async iterator for snapshots belonging to the specified cluster.
-    """
-    snapshots = await resource.list()
-    async for snapshot in snapshots:
+    """Async iterator for snapshots belonging to the specified cluster."""
+    async for snapshot in resource.list():
         # CSI Cinder sets metadata on the volumes that we can look for
         owner = snapshot.metadata.get("cinder.csi.openstack.org/cluster")
         if owner and owner == cluster:
@@ -129,9 +128,7 @@ async def snapshots_for_cluster(resource, cluster):
 
 
 async def empty(async_iterator):
-    """
-    Returns True if the given async iterator is empty, False otherwise.
-    """
+    """Returns True if the given async iterator is empty, False otherwise."""
     try:
         _ = await async_iterator.__anext__()
     except StopAsyncIteration:
@@ -141,8 +138,7 @@ async def empty(async_iterator):
 
 
 async def try_delete(logger, resource, instances, **kwargs):
-    """
-    Tries to delete the specified instances, catching 400 and 409 exceptions for retry.
+    """Tries to delete the specified instances, catches 400 & 409 exceptions for retry.
 
     It returns a boolean indicating whether a check is required for the resource.
     """
@@ -154,7 +150,7 @@ async def try_delete(logger, resource, instances, **kwargs):
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code in {400, 409}:
                 logger.warn(
-                    f"got status code {exc.response.status_code} when attempting to delete "
+                    f"got status code {exc.response.status_code} when trying to delete "
                     f"{resource.singular_name} with ID {instance.id} - will retry"
                 )
             else:
@@ -165,9 +161,8 @@ async def try_delete(logger, resource, instances, **kwargs):
 async def purge_openstack_resources(
     logger, clouds, cloud_name, cacert, name, include_volumes, include_appcred
 ):
-    """
-    Cleans up the OpenStack resources created by the OCCM and CSI for a cluster.
-    """
+    """Cleans up the OpenStack resources created by the OCCM and CSI for a cluster."""
+
     # Use the credential to delete external resources as required
     async with openstack.Cloud.from_clouds(clouds, cloud_name, cacert) as cloud:
         if not cloud.is_authenticated:
@@ -195,7 +190,7 @@ async def purge_openstack_resources(
         )
         logger.info("deleted load balancers for LoadBalancer services")
 
-        # Delete any security groups associated with loadbalancer services for the cluster
+        # Delete security groups associated with loadbalancer services for the cluster
         secgroups = networkapi.resource("security-groups")
         check_secgroups = await try_delete(
             logger, secgroups, secgroups_for_cluster(secgroups, name)
@@ -209,8 +204,8 @@ async def purge_openstack_resources(
         # a historically valid alias, see:
         # - https://docs.openstack.org/keystone/latest/contributor/service-catalog.html
         # - https://service-types.openstack.org/service-types.json
-        # TODO: Make use of https://opendev.org/openstack/os-service-types to improve
-        # service type alias handling?
+        # TODO(sd109): Make use of https://opendev.org/openstack/os-service-types to
+        # improve service type alias handling?
         try:
             volumeapi = cloud.api_client("volumev3")
         except KeyError:
@@ -231,7 +226,7 @@ async def purge_openstack_resources(
             )
             logger.info("deleted snapshots for persistent volume claims")
             check_volumes = await try_delete(
-                logger, volumes, volumes_for_cluster(volumes_detail, name)
+                logger, volumes, filtered_volumes_for_cluster(volumes_detail, name)
             )
             logger.info("deleted volumes for persistent volume claims")
 
@@ -242,7 +237,9 @@ async def purge_openstack_resources(
             raise ResourcesStillPresentError("loadbalancers", name)
         if check_secgroups and not await empty(secgroups_for_cluster(secgroups, name)):
             raise ResourcesStillPresentError("security-groups", name)
-        if check_volumes and not await empty(volumes_for_cluster(volumes_detail, name)):
+        if check_volumes and not await empty(
+            filtered_volumes_for_cluster(volumes_detail, name)
+        ):
             raise ResourcesStillPresentError("volumes", name)
         if check_snapshots and not await empty(
             snapshots_for_cluster(snapshots_detail, name)
@@ -273,9 +270,9 @@ async def purge_openstack_resources(
 
 
 async def patch_finalizers(resource, name, namespace, finalizers):
-    """
-    Patches the finalizers of a resource. If the resource does not exist any
-    more, that is classed as a success.
+    """Patches the finalizers of a resource.
+
+    If the resource does not exist anymore, that is classed as a success.
     """
     try:
         await resource.patch(
@@ -291,8 +288,7 @@ async def patch_finalizers(resource, name, namespace, finalizers):
 
 
 def retry_event(handler):
-    """
-    Decorator for retrying events on Kubernetes objects.
+    """Decorator for retrying events on Kubernetes objects.
 
     Instead of retrying within the handler, potentially on stale data, the object is
     annotated with the number of times it has been retried. This triggers a new event
@@ -314,7 +310,7 @@ def retry_event(handler):
                 kwargs["logger"].warn(str(exc))
                 backoff = exc.delay
             elif isinstance(
-                exc, (FinalizerStillPresentError, ResourcesStillPresentError)
+                exc, FinalizerStillPresentError | ResourcesStillPresentError
             ):
                 kwargs["logger"].warn(str(exc))
                 backoff = 5
@@ -323,6 +319,8 @@ def retry_event(handler):
                 # Calculate the backoff
                 backoff = RETRY_DEFAULT_DELAY
             # Wait for the backoff before annotating the resource
+            if backoff is None:
+                backoff = RETRY_DEFAULT_DELAY
             await asyncio.sleep(backoff)
             # Annotate the object with a random value to trigger another event
             try:
@@ -353,7 +351,7 @@ def retry_event(handler):
 async def on_openstackcluster_event(
     name, namespace, meta, labels, spec, logger, **kwargs
 ):
-    _on_openstackcluster_event_impl(
+    await _on_openstackcluster_event_impl(
         name, namespace, meta, labels, spec, logger, **kwargs
     )
 
@@ -361,14 +359,13 @@ async def on_openstackcluster_event(
 async def _on_openstackcluster_event_impl(
     name, namespace, meta, labels, spec, logger, **kwargs
 ):
-    """
-    Executes whenever an event occurs for an OpenStack cluster.
-    """
+    """Executes whenever an event occurs for an OpenStack cluster."""
+
     # Get the resource for manipulating OpenStackClusters at the preferred version
     openstackclusters = await _get_os_cluster_client()
 
-    # Use the value of the `cluster.x-k8s.io/cluster-name` label as the cluster name if it exists,
-    # otherwise, fall back to the OpenStackCluster resource name.
+    # Use the value of the `cluster.x-k8s.io/cluster-name` label as the cluster name
+    # if it exists, otherwise, fall back to the OpenStackCluster resource name.
     clustername = labels.get("cluster.x-k8s.io/cluster-name", name)
     logger.debug(f"cluster name that will be used for cleanup: '{clustername}'")
 
@@ -442,7 +439,8 @@ async def _on_openstackcluster_event_impl(
             await _delete_secret(clouds_secret.metadata["name"], namespace)
             logger.info("cloud credential secret deleted")
         elif remove_appcred:
-            # If the annotation says delete but other controllers are still acting, go round again
+            # If the annotation says delete but other controllers are still acting,
+            # go round again
             raise FinalizerStillPresentError(
                 next(f for f in finalizers if f != FINALIZER), name
             )

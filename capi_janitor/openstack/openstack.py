@@ -9,36 +9,28 @@ from easykube import rest
 
 
 class UnsupportedAuthenticationError(Exception):
-    """
-    Raised when an unsupported authentication method is used.
-    """
+    """Raised when an unsupported authentication method is used."""
 
     def __init__(self, auth_type):
         super().__init__(f"unsupported authentication type: {auth_type}")
 
 
 class AuthenticationError(Exception):
-    """
-    Raised when an unknown authentication error is encountered.
-    """
+    """Raised when an unknown authentication error is encountered."""
 
     def __init__(self, user):
         super().__init__(f"failed to authenticate as user: {user}")
 
 
 class CatalogError(Exception):
-    """
-    Raised when an unknown catalog service type is requested.
-    """
+    """Raised when an unknown catalog service type is requested."""
 
     def __init__(self, name):
         super().__init__(f"service type {name} not found in OpenStack service catalog")
 
 
 class Auth(httpx.Auth):
-    """
-    Authenticator class for OpenStack connections.
-    """
+    """Authenticator class for OpenStack connections."""
 
     def __init__(
         self, auth_url, application_credential_id, application_credential_secret
@@ -52,8 +44,9 @@ class Auth(httpx.Auth):
 
     @contextlib.asynccontextmanager
     async def _refresh_token(self):
-        """
-        Context manager to ensure only one request at a time triggers a token refresh.
+        """Context manager to ensure only one request at a time
+
+        triggers a token refresh.
         """
         token = self._token
         async with self._lock:
@@ -95,9 +88,7 @@ class Auth(httpx.Auth):
 
 
 class Resource(rest.Resource):
-    """
-    Base resource for OpenStack APIs.
-    """
+    """Base resource for OpenStack APIs."""
 
     def __init__(self, client, name, prefix=None, plural_name=None, singular_name=None):
         super().__init__(client, name, prefix)
@@ -140,9 +131,7 @@ class Resource(rest.Resource):
 
 
 class Client(rest.AsyncClient):
-    """
-    Client for OpenStack APIs.
-    """
+    """Client for OpenStack APIs."""
 
     def __init__(self, /, base_url, prefix=None, **kwargs):
         # Extract the path part of the base_url
@@ -173,9 +162,7 @@ class Client(rest.AsyncClient):
 
 
 class Cloud:
-    """
-    Object for interacting with OpenStack clouds.
-    """
+    """Object for interacting with OpenStack clouds."""
 
     def __init__(self, auth, transport, interface, region=None):
         self._auth = auth
@@ -219,29 +206,21 @@ class Cloud:
 
     @property
     def is_authenticated(self):
-        """
-        Returns True if the cloud is authenticated, False otherwise.
-        """
+        """Returns True if the cloud is authenticated, False otherwise."""
         return bool(self._endpoints)
 
     @property
     def current_user_id(self):
-        """
-        The ID of the current user.
-        """
+        """The ID of the current user."""
         return self._auth._user_id
 
     @property
     def apis(self):
-        """
-        The APIs supported by the cloud.
-        """
+        """The APIs supported by the cloud."""
         return list(self._endpoints.keys())
 
     def api_client(self, name, prefix=None):
-        """
-        Returns a client for the named API.
-        """
+        """Returns a client for the named API."""
         if name not in self._clients:
             self._clients[name] = Client(
                 base_url=self._endpoints[name],
