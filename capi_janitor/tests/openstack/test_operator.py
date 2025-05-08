@@ -6,27 +6,21 @@ import yaml
 import easykube
 from easykube.rest.util import PropertyDict
 
-from capi_janitor.openstack import operator, openstack
-from capi_janitor.openstack.operator import OPENSTACK_USER_VOLUMES_RECLAIM_PROPERTY
 from capi_janitor.openstack import openstack
+from capi_janitor.openstack import operator
+from capi_janitor.openstack.operator import OPENSTACK_USER_VOLUMES_RECLAIM_PROPERTY
 
 
 # Helper to create an async iterable
-def aiter(iterable):
-    class AsyncIter:
-        def __init__(self, it):
-            self.it = iter(it)
+class AsyncIterList:
+    def __init__(self, items):
+        self.items = items
+        self.kwargs = None
 
-        def __aiter__(self):
-            return self
-
-        async def __anext__(self):
-            try:
-                return next(self.it)
-            except StopIteration:
-                raise StopAsyncIteration
-
-    return AsyncIter(iterable)
+    async def list(self, **kwargs):
+        self.kwargs = kwargs
+        for item in self.items:
+            yield item
 
 
 class TestOperator(unittest.IsolatedAsyncioTestCase):
@@ -39,55 +33,50 @@ class TestOperator(unittest.IsolatedAsyncioTestCase):
         mock_easykube.aclose.assert_awaited_once_with()
 
     async def test_fips_for_cluster(self):
+        prefix = "Floating IP for Kubernetes external service from cluster"
         fips = [
             mock.Mock(
-                description="Floating IP for Kubernetes external service from cluster mycluster",
-                id=1,
+                description=f"{prefix} mycluster",
             ),
             mock.Mock(
-                description="Floating IP for Kubernetes external service from cluster othercluster",
-                id=2,
+                description=f"{prefix} asdf",
             ),
-            mock.Mock(description="Some other description", id=3),
+            mock.Mock(description="Some other description"),
             mock.Mock(
-                description="Floating IP for Kubernetes external service from cluster mycluster",
-                id=4,
+                description=f"{prefix} mycluster",
             ),
         ]
+        resource_mock = AsyncIterList(fips)
 
-        resource_mock = mock.Mock()
-        resource_mock.list = mock.AsyncMock(return_value=aiter(fips))
-
-        result = []
-        async for fip in operator.fips_for_cluster(resource_mock, "mycluster"):
-            result.append(fip)
+        result = [
+            fip async for fip in operator.fips_for_cluster(resource_mock, "mycluster")
+        ]
 
         self.assertEqual(len(result), 2)
-        self.assertEqual(result[0].id, 1)
-        self.assertEqual(result[1].id, 4)
+        self.assertEqual(result[0], fips[0])
+        self.assertEqual(result[1], fips[3])
 
     async def test_lbs_for_cluster(self):
         lbs = [
-            mock.Mock(name="lb1", id=1),
-            mock.Mock(name="lb2", id=2),
-            mock.Mock(name="lb3", id=3),
-            mock.Mock(name="lb4", id=4),
+            mock.Mock(name="lb0"),
+            mock.Mock(name="lb1"),
+            mock.Mock(name="lb2"),
+            mock.Mock(name="lb3"),
         ]
+        # can't pass name into mock.Mock() to do this
         lbs[0].name = "kube_service_mycluster_api"
         lbs[1].name = "kube_service_othercluster_api"
         lbs[2].name = "fake_service_mycluster_api"
         lbs[3].name = "kube_service_mycluster_ui"
+        resource_mock = AsyncIterList(lbs)
 
-        resource_mock = mock.Mock()
-        resource_mock.list = mock.AsyncMock(return_value=aiter(lbs))
-
-        result = []
-        async for lb in operator.lbs_for_cluster(resource_mock, "mycluster"):
-            result.append(lb)
-
+        result = [
+            lb async for lb in operator.lbs_for_cluster(resource_mock, "mycluster")
+        ]
+        
         self.assertEqual(len(result), 2)
-        self.assertEqual(result[0].id, 1)
-        self.assertEqual(result[1].id, 4)
+        self.assertEqual(result[0], lbs[0])
+        self.assertEqual(result[1], lbs[3])
 
     async def test_secgroups_for_cluster(self):
         secgroups = [
