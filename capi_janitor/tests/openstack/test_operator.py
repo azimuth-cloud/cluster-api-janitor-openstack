@@ -55,6 +55,7 @@ class TestOperator(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(result), 2)
         self.assertEqual(result[0], fips[0])
         self.assertEqual(result[1], fips[3])
+        self.assertEqual(resource_mock.kwargs, {})
 
     async def test_lbs_for_cluster(self):
         lbs = [
