@@ -39,4 +39,4 @@ RUN apt-get update && \
 COPY --from=python-builder /venv /venv
 
 USER $APP_UID
-CMD /venv/bin/kopf run --module capi_janitor.openstack.operator --all-namespaces --verbose
+CMD ["/venv/bin/kopf", "run", "--module", "capi_janitor.openstack.operator", "--all-namespaces", "--verbose"]
