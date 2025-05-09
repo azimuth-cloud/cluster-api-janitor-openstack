@@ -1,7 +1,7 @@
 [tool.ruff]
 # Match Black's style
 line-length = 88
-target-version = "py310"  # adjust to your minimum supported Python version
+target-version = "py312"  # adjust to your minimum supported Python version
 
 # Match Flake8/hacking exclude patterns
 exclude = [
