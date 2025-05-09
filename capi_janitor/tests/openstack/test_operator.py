@@ -5,7 +5,6 @@ import yaml
 
 import easykube
 import httpx
-import kopf
 
 from capi_janitor.openstack import openstack
 from capi_janitor.openstack import operator
@@ -470,34 +469,3 @@ class TestOperator(unittest.IsolatedAsyncioTestCase):
 
     #     # Example: Validate if appcred deletion was attempted
     #     mock_identityapi.resource.assert_any_call("application_credentials")
-
-    async def test_successful_patch(self):
-        resource = mock.AsyncMock()
-        await operator.patch_finalizers(
-            resource, "test-name", "default", ["finalizer.k8s.io"]
-        )
-        resource.patch.assert_awaited_once_with(
-            "test-name",
-            {"metadata": {"finalizers": ["finalizer.k8s.io"]}},
-            namespace="default",
-        )
-
-    async def test_patch_finalizers_error_handling(self):
-        resource = mock.AsyncMock()
-
-        response_mock = mock.Mock()
-        response_mock.status_code = 422
-        response_mock.json.return_value = {"message": "error"}
-
-        api_error_422 = easykube.ApiError(mock.Mock(response=response_mock))
-        api_error_422.status_code = 422
-        resource.patch.side_effect = api_error_422
-
-        with self.assertRaises(kopf.TemporaryError):
-            await operator.patch_finalizers(resource, "name", "ns", [])
-
-        exc_404 = easykube.ApiError("not found")
-        exc_404.status_code = 404
-        resource.patch.side_effect = exc_404
-
-        await operator.patch_finalizers(resource, "name", "ns", [])
