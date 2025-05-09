@@ -4,7 +4,7 @@ from unittest import mock
 import yaml
 
 import easykube
-from easykube.rest.util import PropertyDict
+import httpx
 
 from capi_janitor.openstack import openstack
 from capi_janitor.openstack import operator
@@ -103,12 +103,30 @@ class TestOperator(unittest.IsolatedAsyncioTestCase):
 
     async def test_filtered_volumes_for_cluster(self):
         volumes = [
-            mock.Mock(metadata={"cinder.csi.openstack.org/cluster": "mycluster"}),
-            mock.Mock(metadata={"cinder.csi.openstack.org/cluster": "othercluster"}),
-            mock.Mock(metadata={"cinder.csi.openstack.org/cluster": "mycluster"}),
-            mock.Mock(metadata={"cinder.csi.openstack.org/cluster": "othercluster"}),
-            # Volumes with invalid metadata
-            mock.Mock(metadata={"another_key": "value"}),
+            mock.Mock(
+                metadata={
+                    "cinder.csi.openstack.org/cluster": "mycluster",
+                    OPENSTACK_USER_VOLUMES_RECLAIM_PROPERTY: "false",
+                }
+            ),
+            mock.Mock(
+                metadata={
+                    "cinder.csi.openstack.org/cluster": "mycluster",
+                    OPENSTACK_USER_VOLUMES_RECLAIM_PROPERTY: "true",
+                }
+            ),
+            mock.Mock(
+                metadata={
+                    "cinder.csi.openstack.org/cluster": "othercluster",
+                    OPENSTACK_USER_VOLUMES_RECLAIM_PROPERTY: "false",
+                }
+            ),
+            mock.Mock(
+                metadata={
+                    "cinder.csi.openstack.org/cluster": "mycluster",
+                }
+            ),
+            mock.Mock(metadata={"other_key": "value"}),
         ]
         resource_mock = AsyncIterList(volumes)
 
@@ -120,7 +138,7 @@ class TestOperator(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(result), 2)
         self.assertEqual(result[0], volumes[0])
-        self.assertEqual(result[1], volumes[2])
+        self.assertEqual(result[1], volumes[3])
 
     async def test_snapshots_for_cluster(self):
         snapshots = [
@@ -150,6 +168,56 @@ class TestOperator(unittest.IsolatedAsyncioTestCase):
         async_iter = AsyncIterList([1, 2, 3]).__aiter__()
         result = await operator.empty(async_iter)
         self.assertFalse(result)
+
+    async def test_try_delete_success(self):
+        instances = [mock.Mock(id=1), mock.Mock(id=2)]
+        resource = mock.Mock()
+        resource.delete = mock.AsyncMock()
+        resource.singular_name = "test_resource"
+        logger = mock.Mock()
+
+        result = await operator.try_delete(logger, resource, AsyncIterList(instances))
+
+        self.assertTrue(result)
+        resource.delete.assert_any_await(1)
+        resource.delete.assert_any_await(2)
+        logger.warn.assert_not_called()
+
+    async def test_try_delete_with_400_and_409_errors(self):
+        instances = [mock.Mock(id=1), mock.Mock(id=2)]
+        resource = mock.Mock()
+        resource.singular_name = "test_resource"
+        logger = mock.Mock()
+
+        resource.delete = mock.AsyncMock(
+            side_effect=[
+                httpx.HTTPStatusError(
+                    "error", request=mock.Mock(), response=mock.Mock(status_code=400)
+                ),
+                httpx.HTTPStatusError(
+                    "error", request=mock.Mock(), response=mock.Mock(status_code=409)
+                ),
+            ]
+        )
+        result = await operator.try_delete(logger, resource, AsyncIterList(instances))
+
+        self.assertTrue(result)
+        self.assertEqual(resource.delete.await_count, 2)
+        self.assertEqual(logger.warn.call_count, 2)
+
+    async def test_delete_with_unexpected_error_raises(self):
+        instances = [mock.Mock(id=1)]
+        resource = mock.Mock()
+        resource.singular_name = "test_resource"
+        logger = mock.Mock()
+
+        resource.delete = mock.AsyncMock(
+            side_effect=httpx.HTTPStatusError(
+                "error", request=mock.Mock(), response=mock.Mock(status_code=500)
+            )
+        )
+        with self.assertRaises(httpx.HTTPStatusError):
+            await operator.try_delete(logger, resource, AsyncIterList(instances))
 
     @mock.patch.object(operator, "patch_finalizers")
     @mock.patch.object(operator, "_get_os_cluster_client")
@@ -401,48 +469,3 @@ class TestOperator(unittest.IsolatedAsyncioTestCase):
 
     #     # Example: Validate if appcred deletion was attempted
     #     mock_identityapi.resource.assert_any_call("application_credentials")
-
-    @mock.patch.object(openstack, "Resource")
-    async def test_user_keep_volumes_filter(self, mock_volumes_resource):
-        # Arrange
-        async def _list_volumes():
-            test_volumes = [
-                {
-                    "id": "123",
-                    "name": "volume-1",
-                    "metadata": {
-                        "cinder.csi.openstack.org/cluster": "cluster-1",
-                        OPENSTACK_USER_VOLUMES_RECLAIM_PROPERTY: "anything-but-true",
-                    },
-                },
-                {
-                    "id": "456",
-                    "name": "volume-2",
-                    "metadata": {
-                        "cinder.csi.openstack.org/cluster": "cluster-1",
-                        OPENSTACK_USER_VOLUMES_RECLAIM_PROPERTY: "true",
-                    },
-                },
-                {
-                    "id": "789",
-                    "name": "volume-3",
-                    "metadata": {
-                        "cinder.csi.openstack.org/cluster": "cluster-2",
-                        OPENSTACK_USER_VOLUMES_RECLAIM_PROPERTY: "true",
-                    },
-                },
-            ]
-            for volume in map(PropertyDict, test_volumes):
-                yield volume
-
-        mock_volumes_resource.list.return_value = _list_volumes()
-        # Act
-        filtered_volumes = [
-            v
-            async for v in operator.filtered_volumes_for_cluster(
-                mock_volumes_resource, "cluster-1"
-            )
-        ]
-        # Assert
-        self.assertEqual(len(filtered_volumes), 1)
-        self.assertEqual(filtered_volumes[0].get("name"), "volume-1")
