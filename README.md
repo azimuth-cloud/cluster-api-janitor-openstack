@@ -40,6 +40,10 @@ You can run individual unit tests by running:
 tox -e py3 -- <name-of-unit-test>
 ```
 
+Note, failures on your initial tox run may be automatically
+fixed, where possible. So your second tox run may pass.
+This way we can run the default tox target in CI.
+
 ## Configuration
 
 `cluster-api-janitor-openstack` will always clean up
