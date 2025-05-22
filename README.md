@@ -24,6 +24,22 @@ helm upgrade \
   --install
 ```
 
+## Tox for unittests and linting
+
+We use tox to run unit tests and linters across the code.
+To run all the checks, including efforts to automatically
+fix linting issues, please run:
+
+```sh
+tox
+```
+
+You can run individual unit tests by running:
+
+```sh
+tox -e py3 -- <name-of-unit-test>
+```
+
 ## Configuration
 
 `cluster-api-janitor-openstack` will always clean up
