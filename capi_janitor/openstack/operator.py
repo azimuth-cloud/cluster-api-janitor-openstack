@@ -5,11 +5,10 @@ import os
 import random
 import string
 
-import kopf
-import yaml
-
 import easykube
 import httpx
+import kopf
+import yaml
 
 from . import openstack
 
@@ -47,9 +46,7 @@ async def on_startup(**kwargs):
 
 @kopf.on.cleanup()
 async def on_cleanup(**kwargs):
-    """
-    Runs on operator shutdown.
-    """
+    """Runs on operator shutdown."""
     # Make sure that the easykube client is shut down properly
     await ekclient.aclose()
 
@@ -105,7 +102,6 @@ async def secgroups_for_cluster(resource, cluster):
 
 async def filtered_volumes_for_cluster(resource, cluster):
     """Async iterator for volumes belonging to the specified cluster."""
-
     async for vol in resource.list():
         # CSI Cinder sets metadata on the volumes that we can look for
         owner = vol.metadata.get("cinder.csi.openstack.org/cluster")
@@ -162,7 +158,6 @@ async def purge_openstack_resources(
     logger, clouds, cloud_name, cacert, name, include_volumes, include_appcred
 ):
     """Cleans up the OpenStack resources created by the OCCM and CSI for a cluster."""
-
     # Use the credential to delete external resources as required
     async with openstack.Cloud.from_clouds(clouds, cloud_name, cacert) as cloud:
         if not cloud.is_authenticated:
@@ -360,7 +355,6 @@ async def _on_openstackcluster_event_impl(
     name, namespace, meta, labels, spec, logger, **kwargs
 ):
     """Executes whenever an event occurs for an OpenStack cluster."""
-
     # Get the resource for manipulating OpenStackClusters at the preferred version
     openstackclusters = await _get_os_cluster_client()
 
@@ -375,7 +369,10 @@ async def _on_openstackcluster_event_impl(
     if not meta.get("deletionTimestamp"):
         if FINALIZER not in finalizers:
             await patch_finalizers(
-                openstackclusters, name, namespace, finalizers + [FINALIZER]
+                openstackclusters,
+                name,
+                namespace,
+                [*finalizers, FINALIZER],
             )
             logger.info("added janitor finalizer to cluster")
         return

@@ -1,8 +1,7 @@
-FROM ubuntu:jammy AS python-builder
+FROM ubuntu:24.04 AS python-builder
 
 RUN apt-get update && \
-    apt-get install -y python3 python3-venv && \
-    rm -rf /var/lib/apt/lists/*
+    apt-get install -y python3 python3-venv
 
 RUN python3 -m venv /venv && \
     /venv/bin/pip install -U pip setuptools
@@ -14,16 +13,16 @@ COPY . /app
 RUN /venv/bin/pip install /app
 
 
-FROM ubuntu:jammy
+FROM ubuntu:24.04
 
 # Don't buffer stdout and stderr as it breaks realtime logging
-ENV PYTHONUNBUFFERED 1
+ENV PYTHONUNBUFFERED=1
 
 # Create the user that will be used to run the app
-ENV APP_UID 1001
-ENV APP_GID 1001
-ENV APP_USER app
-ENV APP_GROUP app
+ENV APP_UID=1001
+ENV APP_GID=1001
+ENV APP_USER=app
+ENV APP_GROUP=app
 RUN groupadd --gid $APP_GID $APP_GROUP && \
     useradd \
       --no-create-home \
@@ -40,5 +39,4 @@ RUN apt-get update && \
 COPY --from=python-builder /venv /venv
 
 USER $APP_UID
-ENTRYPOINT ["tini", "-g", "--"]
-CMD ["/venv/bin/kopf", "run", "--module", "capi_janitor.openstack.operator", "--all-namespaces"]
+CMD ["/venv/bin/kopf", "run", "--module", "capi_janitor.openstack.operator", "--all-namespaces", "--verbose"]
