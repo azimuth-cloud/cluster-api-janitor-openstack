@@ -1,13 +1,12 @@
 import base64
 import unittest
 from unittest import mock
-import yaml
 
 import easykube
 import httpx
+import yaml
 
-from capi_janitor.openstack import openstack
-from capi_janitor.openstack import operator
+from capi_janitor.openstack import openstack, operator
 from capi_janitor.openstack.operator import OPENSTACK_USER_VOLUMES_RECLAIM_PROPERTY
 
 
