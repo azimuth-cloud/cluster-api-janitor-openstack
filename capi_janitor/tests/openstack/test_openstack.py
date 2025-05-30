@@ -1,6 +1,7 @@
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
-from capi_janitor.openstack.openstack import Cloud, AuthenticationError
+
+from capi_janitor.openstack.openstack import AuthenticationError, Cloud
 
 
 class TestCloudAenter(unittest.IsolatedAsyncioTestCase):
