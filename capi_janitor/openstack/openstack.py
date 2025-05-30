@@ -4,7 +4,6 @@ import re
 import urllib.parse
 
 import httpx
-
 from easykube import rest
 
 
