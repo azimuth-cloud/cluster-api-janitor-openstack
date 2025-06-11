@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from capi_janitor.openstack.openstack import AuthenticationError, Cloud
 
 
-class TestCloudAenter(unittest.IsolatedAsyncioTestCase):
+class TestCloudAsyncContext(unittest.IsolatedAsyncioTestCase):
     # Set up common variables for all tests
     async def asyncSetUp(self):
         # Auth is mocked to simulate authentication
@@ -19,7 +19,7 @@ class TestCloudAenter(unittest.IsolatedAsyncioTestCase):
 
     # Test the __aenter__ method for auth success and general functionality
     @patch("capi_janitor.openstack.openstack.Client")
-    async def test_aenter_successful_authentication(self, mock_client):
+    async def test_cloud_successful_authentication(self, mock_client):
         # Patched client to simulate a successful authentication
         mock_client_instance = AsyncMock()
         # Return mock for the client
@@ -55,7 +55,7 @@ class TestCloudAenter(unittest.IsolatedAsyncioTestCase):
 
     # Test the __aenter__ method for auth failure
     @patch("capi_janitor.openstack.openstack.Client")
-    async def test_aenter_authentication_failure(self, mock_client):
+    async def test_cloud_authentication_failure(self, mock_client):
         mock_client_instance = AsyncMock()
         mock_client.return_value = mock_client_instance
         # Simulate an auth error with a named user
@@ -71,7 +71,7 @@ class TestCloudAenter(unittest.IsolatedAsyncioTestCase):
 
     # Test the __aenter__ method for 404 error
     @patch("capi_janitor.openstack.openstack.Client")
-    async def test_aenter_404_error(self, mock_client):
+    async def test_cloud_auth_404_error(self, mock_client):
         mock_client_instance = AsyncMock()
         mock_client.return_value = mock_client_instance
         # Simulate a 404 error
@@ -86,7 +86,7 @@ class TestCloudAenter(unittest.IsolatedAsyncioTestCase):
 
     # Test the __aenter__ method for no matching interface
     @patch("capi_janitor.openstack.openstack.Client")
-    async def test_aenter_no_matching_interface(self, mock_client):
+    async def test_cloud_no_matching_interface(self, mock_client):
         mock_client_instance = AsyncMock()
         mock_client.return_value = mock_client_instance
         # No matching interface in the response
@@ -112,7 +112,7 @@ class TestCloudAenter(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(cloud.apis, [])
 
     @patch("capi_janitor.openstack.openstack.Client")
-    async def test_aenter_no_matching_region_id(self, mock_client):
+    async def test_cloud_no_matching_region_id(self, mock_client):
         mock_client_instance = AsyncMock()
         mock_client.return_value = mock_client_instance
         # No matching region_id in the response
@@ -138,7 +138,7 @@ class TestCloudAenter(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(cloud.apis, [])
 
     @patch("capi_janitor.openstack.openstack.Client")
-    async def test_aenter_filter_endpoints(self, mock_client):
+    async def test_cloud_filter_endpoints(self, mock_client):
         mock_client_instance = AsyncMock()
         mock_client.return_value = mock_client_instance
         # Return multiple endpoints, one matching, one not
@@ -175,7 +175,7 @@ class TestCloudAenter(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("network", cloud.apis)
 
     @patch("capi_janitor.openstack.openstack.Client")
-    async def test_aenter_multiple_services(self, mock_client):
+    async def test_cloud_multiple_services(self, mock_client):
         mock_client_instance = AsyncMock()
         mock_client.return_value = mock_client_instance
         # Return multiple services, some matching, some not
@@ -223,7 +223,7 @@ class TestCloudAenter(unittest.IsolatedAsyncioTestCase):
             self.assertIn("network", cloud.apis)
 
     @patch("capi_janitor.openstack.openstack.Client")
-    async def test_aenter_empty_endpoint_list(self, mock_client):
+    async def test_cloud_empty_endpoint_list(self, mock_client):
         mock_client_instance = AsyncMock()
         mock_client.return_value = mock_client_instance
         mock_client_instance.get.return_value.json = MagicMock(
@@ -234,7 +234,7 @@ class TestCloudAenter(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(cloud.is_authenticated)
 
     @patch("capi_janitor.openstack.openstack.Client")
-    async def test_aenter_no_region_specified(self, mock_client):
+    async def test_cloud_no_region_specified(self, mock_client):
         # Set up the cloud instance without a region
         self.cloud = Cloud(self.auth, self.transport, self.interface, region=None)
         mock_client_instance = AsyncMock()

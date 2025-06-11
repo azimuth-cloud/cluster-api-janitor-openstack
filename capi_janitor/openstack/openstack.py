@@ -188,10 +188,7 @@ class Cloud:
                 raise
         self._endpoints = {}
         for entry in response.json()["catalog"]:
-            if not entry["endpoints"]:
-                continue
-
-            for ep in entry["endpoints"]:
+            for ep in entry.get("endpoints", []):
                 if ep.get("interface") == self._interface and (
                     not self._region or ep.get("region_id") == self._region
                 ):
