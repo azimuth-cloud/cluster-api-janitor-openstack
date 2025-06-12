@@ -186,18 +186,14 @@ class Cloud:
                 return self
             else:
                 raise
-        self._endpoints = {
-            entry["type"]: next(
-                ep["url"]
-                for ep in entry["endpoints"]
-                if (
-                    ep["interface"] == self._interface
-                    and (not self._region or ep["region"] == self._region)
-                )
-            )
-            for entry in response.json()["catalog"]
-            if len(entry["endpoints"]) > 0
-        }
+        self._endpoints = {}
+        for entry in response.json()["catalog"]:
+            for ep in entry.get("endpoints", []):
+                if ep.get("interface") == self._interface and (
+                    not self._region or ep.get("region_id") == self._region
+                ):
+                    self._endpoints[entry["type"]] = ep["url"]
+                    break
         return self
 
     async def __aexit__(self, exc_type, exc_value, traceback):
