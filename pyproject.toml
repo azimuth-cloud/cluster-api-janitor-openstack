@@ -29,6 +29,10 @@ select = [
     "N",
 ]
 
+ignore = [
+    "UP017", # remove and fix once 3.10 not tested in CI
+]
+
 [tool.mypy]
 follow_imports = "silent"
 warn_redundant_casts = true
