@@ -154,7 +154,7 @@ async def try_delete(logger, resource, instances, **kwargs):
     return check_required
 
 
-async def purge_openstack_resources(
+async def purge_openstack_resources(  # noqa: C901
     logger,
     clouds,
     cloud_name,
@@ -193,7 +193,7 @@ async def purge_openstack_resources(
                 logger,
                 loadbalancers,
                 lbs_for_cluster(loadbalancers, name),
-                cascade="true"
+                cascade="true",
             )
             logger.info("deleted load balancers for LoadBalancer services")
 
@@ -441,8 +441,8 @@ async def _on_openstackcluster_event_impl(
             # Default to false since this is default CAPO behaviour if
             # ApiServerLoadBalancer field is omitted from OpenStackClusterSpec
             # https://github.com/kubernetes-sigs/cluster-api-provider-openstack/blob/57ae27ee114bda3606d92163397697b640272673/api/v1beta1/openstackcluster_types.go#L99-L101
-            spec.get('apiServerLoadBalancer', {}).get('enabled', False) and
-            status.get('apiServerLoadBalancer', {}).get('id', '') != ''
+            spec.get("apiServerLoadBalancer", {}).get("enabled", False)
+            and status.get("apiServerLoadBalancer", {}).get("id", "") != ""
         )
 
         await purge_openstack_resources(
