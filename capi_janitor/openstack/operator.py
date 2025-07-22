@@ -154,8 +154,15 @@ async def try_delete(logger, resource, instances, **kwargs):
     return check_required
 
 
-async def purge_openstack_resources(
-    logger, clouds, cloud_name, cacert, name, include_volumes, include_appcred
+async def purge_openstack_resources(  # noqa: C901
+    logger,
+    clouds,
+    cloud_name,
+    cacert,
+    name,
+    include_volumes,
+    include_loadbalancers,
+    include_appcred,
 ):
     """Cleans up the OpenStack resources created by the OCCM and CSI for a cluster."""
     # Use the credential to delete external resources as required
@@ -180,10 +187,15 @@ async def purge_openstack_resources(
         # Delete any loadbalancers associated with loadbalancer services for the cluster
         lbapi = cloud.api_client("load-balancer", "/v2/lbaas/")
         loadbalancers = lbapi.resource("loadbalancers")
-        check_lbs = await try_delete(
-            logger, loadbalancers, lbs_for_cluster(loadbalancers, name), cascade="true"
-        )
-        logger.info("deleted load balancers for LoadBalancer services")
+        check_lbs = False
+        if include_loadbalancers:
+            check_lbs = await try_delete(
+                logger,
+                loadbalancers,
+                lbs_for_cluster(loadbalancers, name),
+                cascade="true",
+            )
+            logger.info("deleted load balancers for LoadBalancer services")
 
         # Delete security groups associated with loadbalancer services for the cluster
         secgroups = networkapi.resource("security-groups")
@@ -344,15 +356,15 @@ def retry_event(handler):
 @kopf.on.event(CAPO_API_GROUP, "openstackclusters")
 @retry_event
 async def on_openstackcluster_event(
-    name, namespace, meta, labels, spec, logger, **kwargs
+    name, namespace, meta, labels, spec, status, logger, **kwargs
 ):
     await _on_openstackcluster_event_impl(
-        name, namespace, meta, labels, spec, logger, **kwargs
+        name, namespace, meta, labels, spec, status, logger, **kwargs
     )
 
 
 async def _on_openstackcluster_event_impl(
-    name, namespace, meta, labels, spec, logger, **kwargs
+    name, namespace, meta, labels, spec, status, logger, **kwargs
 ):
     """Executes whenever an event occurs for an OpenStack cluster."""
     # Get the resource for manipulating OpenStackClusters at the preferred version
@@ -421,6 +433,18 @@ async def _on_openstackcluster_event_impl(
         )
         remove_appcred = credential_annotation_value == CREDENTIAL_ANNOTATION_DELETE
 
+        # Handle the case where the API server load balancer is enabled but was
+        # never successfully created (possibly due to LB permissions error)
+        # meaning that there cannot be any other LBs to remove
+        # (since API server was never online due to missing load balancer)
+        remove_loadbalancers = (
+            # Default to false since this is default CAPO behaviour if
+            # ApiServerLoadBalancer field is omitted from OpenStackClusterSpec
+            # https://github.com/kubernetes-sigs/cluster-api-provider-openstack/blob/57ae27ee114bda3606d92163397697b640272673/api/v1beta1/openstackcluster_types.go#L99-L101
+            spec.get("apiServerLoadBalancer", {}).get("enabled", False)
+            and status.get("apiServerLoadBalancer", {}).get("id", "") != ""
+        )
+
         await purge_openstack_resources(
             logger,
             clouds,
@@ -428,8 +452,10 @@ async def _on_openstackcluster_event_impl(
             cacert,
             clustername,
             volumes_annotation_value == VOLUMES_ANNOTATION_DELETE,
+            remove_loadbalancers,
             remove_appcred and len(finalizers) == 1,
         )
+
         # If we get to here, OpenStack resources have been successfully deleted
         # So we can remove the appcred secret if we are the last actor
         if remove_appcred and len(finalizers) == 1:

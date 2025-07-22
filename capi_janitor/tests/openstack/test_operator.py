@@ -232,6 +232,7 @@ class TestOperator(unittest.IsolatedAsyncioTestCase):
             meta={},
             labels={},
             spec={},
+            status={},
             logger=logger,
             body={},
         )
@@ -258,6 +259,7 @@ class TestOperator(unittest.IsolatedAsyncioTestCase):
             meta={"deletionTimestamp": "2023-10-01T00:00:00Z"},
             labels={},
             spec={},
+            status={},
             logger=logger,
             body={},
         )
@@ -319,6 +321,7 @@ class TestOperator(unittest.IsolatedAsyncioTestCase):
             },
             labels={},
             spec={"identityRef": {"name": "appcred42"}},
+            status={},
             logger=logger,
             body={},
         )
@@ -330,6 +333,7 @@ class TestOperator(unittest.IsolatedAsyncioTestCase):
             None,
             "mycluster",
             True,
+            False,
             True,
         )
         mock_delete_secret.assert_awaited_once_with("appcred42", "namespace1")
@@ -382,6 +386,7 @@ class TestOperator(unittest.IsolatedAsyncioTestCase):
                 "openstack",
                 None,
                 "mycluster",
+                True,
                 True,
                 False,
             )
