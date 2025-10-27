@@ -136,7 +136,7 @@ class Client(rest.AsyncClient):
         # Extract the path part of the base_url
         url = urllib.parse.urlsplit(base_url)
         # Initialise the client with the scheme/host
-        super().__init__(base_url=f"{url.scheme}://{url.netloc}", **kwargs)
+        super().__init__(base_url=f"{url.scheme}://{url.netloc}", timeout=60, **kwargs)
         # If another prefix is not given, use the path from the base URL as the prefix,
         # otherwise combine the prefixes and remove duplicated path sections.
         # This ensures things like pagination work nicely without duplicating the prefix
