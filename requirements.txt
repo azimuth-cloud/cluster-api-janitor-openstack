@@ -1,10 +1,10 @@
 aiohappyeyeballs==2.6.1
-aiohttp==3.13.2
+aiohttp==3.13.3
 aiosignal==1.4.0
 anyio==4.12.0
 async-timeout==5.0.1
 attrs==25.4.0
-certifi==2025.11.12
+certifi==2026.1.4
 click==8.3.1
 easykube==0.6.0
 exceptiongroup==1.3.1
@@ -14,7 +14,7 @@ httpcore==1.0.9
 httpx==0.28.1
 idna==3.11
 iso8601==2.1.0
-kopf==1.39.1
+kopf==1.40.0
 multidict==6.7.0
 propcache==0.4.1
 python-json-logger==4.0.0
