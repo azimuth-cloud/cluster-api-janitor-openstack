@@ -14,8 +14,8 @@ httpcore==1.0.9
 httpx==0.28.1
 idna==3.11
 iso8601==2.1.0
-kopf==1.40.0
-multidict==6.7.0
+kopf==1.41.1
+multidict==6.7.1
 propcache==0.4.1
 python-json-logger==4.0.0
 PyYAML==6.0.3
