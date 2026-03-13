@@ -101,6 +101,10 @@ class Resource(rest.Resource):
     def singular_name(self):
         return self._singular_name
 
+    @property
+    def plural_name(self):
+        return self._plural_name
+
     def _extract_list(self, response):
         # Some resources support a /detail endpoint
         # In this case, we just want to use the name up to the slash
