@@ -71,7 +71,7 @@ class ResourcesStillPresentError(Exception):
         super().__init__(f"{resource} still present for cluster {cluster}")
 
 
-async def fips_for_cluster(resource, cluster):
+async def fips_for_cluster(logger, resource, cluster):
     """Async iterator for FIPs belonging to the specified cluster."""
     async for fip in resource.list():
         if not fip.description.startswith(
@@ -80,27 +80,37 @@ async def fips_for_cluster(resource, cluster):
             continue
         if not fip.description.endswith(f"from cluster {cluster}"):
             continue
+        logger.info(f"Found {resource.singular_name} {fip.id}")
         yield fip
 
 
-async def lbs_for_cluster(resource, cluster):
+async def lbs_for_cluster(logger, resource, cluster):
     """Async iterator for loadbalancers belonging to the specified cluster."""
-    async for lb in resource.list():
-        if lb.name.startswith(f"kube_service_{cluster}_"):
-            yield lb
+    try:
+        async for lb in resource.list():
+            if lb.name.startswith(f"kube_service_{cluster}_"):
+                logger.info(f"Found {resource.singular_name} {lb.id}")
+                yield lb
+    except httpx.HTTPStatusError as exc:
+        logger.error(
+            f"Got status code {exc.response.status_code} when trying to list "
+            f"{resource.plural_name}, assuming that we cannot delete resources. "
+            f"There may be OpenStack {resource.singular_name} resources left behind!"
+        )
 
 
-async def secgroups_for_cluster(resource, cluster):
+async def secgroups_for_cluster(logger, resource, cluster):
     """Async iterator for security groups belonging to the specified cluster."""
     async for sg in resource.list():
         if not sg.description.startswith("Security Group for"):
             continue
         if not sg.description.endswith(f"Service LoadBalancer in cluster {cluster}"):
             continue
+        logger.info(f"Found {resource.singular_name} {sg.id}")
         yield sg
 
 
-async def filtered_volumes_for_cluster(resource, cluster):
+async def filtered_volumes_for_cluster(logger, resource, cluster):
     """Async iterator for volumes belonging to the specified cluster."""
     async for vol in resource.list():
         # CSI Cinder sets metadata on the volumes that we can look for
@@ -111,15 +121,17 @@ async def filtered_volumes_for_cluster(resource, cluster):
             and owner == cluster
             and vol.metadata.get(OPENSTACK_USER_VOLUMES_RECLAIM_PROPERTY) != "true"
         ):
+            logger.info(f"Found {resource.singular_name} {vol.id}")
             yield vol
 
 
-async def snapshots_for_cluster(resource, cluster):
+async def snapshots_for_cluster(logger, resource, cluster):
     """Async iterator for snapshots belonging to the specified cluster."""
     async for snapshot in resource.list():
         # CSI Cinder sets metadata on the volumes that we can look for
         owner = snapshot.metadata.get("cinder.csi.openstack.org/cluster")
         if owner and owner == cluster:
+            logger.info(f"Found {resource.singular_name} {snapshot.id}")
             yield snapshot
 
 
@@ -143,6 +155,7 @@ async def try_delete(logger, resource, instances, **kwargs):
         check_required = True
         try:
             await resource.delete(instance.id, **kwargs)
+            logger.info(f"Deleted {resource.singular_name} with ID {instance.id}")
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code in {400, 409}:
                 logger.warn(
@@ -161,7 +174,6 @@ async def purge_openstack_resources(  # noqa: C901
     cacert,
     name,
     include_volumes,
-    include_loadbalancers,
     include_appcred,
 ):
     """Cleans up the OpenStack resources created by the OCCM and CSI for a cluster."""
@@ -181,26 +193,26 @@ async def purge_openstack_resources(  # noqa: C901
         # Release any floating IPs associated with loadbalancer services for the cluster
         networkapi = cloud.api_client("network", "/v2.0/")
         fips = networkapi.resource("floatingips")
-        check_fips = await try_delete(logger, fips, fips_for_cluster(fips, name))
+        check_fips = await try_delete(
+            logger, fips, fips_for_cluster(logger, fips, name)
+        )
         logger.info("deleted floating IPs for LoadBalancer services")
 
         # Delete any loadbalancers associated with loadbalancer services for the cluster
         lbapi = cloud.api_client("load-balancer", "/v2/lbaas/")
         loadbalancers = lbapi.resource("loadbalancers")
-        check_lbs = False
-        if include_loadbalancers:
-            check_lbs = await try_delete(
-                logger,
-                loadbalancers,
-                lbs_for_cluster(loadbalancers, name),
-                cascade="true",
-            )
-            logger.info("deleted load balancers for LoadBalancer services")
+        check_lbs = await try_delete(
+            logger,
+            loadbalancers,
+            lbs_for_cluster(logger, loadbalancers, name),
+            cascade="true",
+        )
+        logger.info("deleted load balancers for LoadBalancer services")
 
         # Delete security groups associated with loadbalancer services for the cluster
         secgroups = networkapi.resource("security-groups")
         check_secgroups = await try_delete(
-            logger, secgroups, secgroups_for_cluster(secgroups, name)
+            logger, secgroups, secgroups_for_cluster(logger, secgroups, name)
         )
         logger.info("deleted security groups for LoadBalancer services")
 
@@ -229,27 +241,31 @@ async def purge_openstack_resources(  # noqa: C901
         check_volumes = False
         if include_volumes:
             check_snapshots = await try_delete(
-                logger, snapshots, snapshots_for_cluster(snapshots_detail, name)
+                logger, snapshots, snapshots_for_cluster(logger, snapshots_detail, name)
             )
             logger.info("deleted snapshots for persistent volume claims")
             check_volumes = await try_delete(
-                logger, volumes, filtered_volumes_for_cluster(volumes_detail, name)
+                logger,
+                volumes,
+                filtered_volumes_for_cluster(logger, volumes_detail, name),
             )
             logger.info("deleted volumes for persistent volume claims")
 
         # Check that the resources have actually been deleted
-        if check_fips and not await empty(fips_for_cluster(fips, name)):
+        if check_fips and not await empty(fips_for_cluster(logger, fips, name)):
             raise ResourcesStillPresentError("floatingips", name)
-        if check_lbs and not await empty(lbs_for_cluster(loadbalancers, name)):
+        if check_lbs and not await empty(lbs_for_cluster(logger, loadbalancers, name)):
             raise ResourcesStillPresentError("loadbalancers", name)
-        if check_secgroups and not await empty(secgroups_for_cluster(secgroups, name)):
+        if check_secgroups and not await empty(
+            secgroups_for_cluster(logger, secgroups, name)
+        ):
             raise ResourcesStillPresentError("security-groups", name)
         if check_volumes and not await empty(
-            filtered_volumes_for_cluster(volumes_detail, name)
+            filtered_volumes_for_cluster(logger, volumes_detail, name)
         ):
             raise ResourcesStillPresentError("volumes", name)
         if check_snapshots and not await empty(
-            snapshots_for_cluster(snapshots_detail, name)
+            snapshots_for_cluster(logger, snapshots_detail, name)
         ):
             raise ResourcesStillPresentError("snapshots", name)
 
@@ -433,18 +449,6 @@ async def _on_openstackcluster_event_impl(
         )
         remove_appcred = credential_annotation_value == CREDENTIAL_ANNOTATION_DELETE
 
-        # Handle the case where the API server load balancer is enabled but was
-        # never successfully created (possibly due to LB permissions error)
-        # meaning that there cannot be any other LBs to remove
-        # (since API server was never online due to missing load balancer)
-        remove_loadbalancers = (
-            # Default to false since this is default CAPO behaviour if
-            # ApiServerLoadBalancer field is omitted from OpenStackClusterSpec
-            # https://github.com/kubernetes-sigs/cluster-api-provider-openstack/blob/57ae27ee114bda3606d92163397697b640272673/api/v1beta1/openstackcluster_types.go#L99-L101
-            spec.get("apiServerLoadBalancer", {}).get("enabled", False)
-            and status.get("apiServerLoadBalancer", {}).get("id", "") != ""
-        )
-
         await purge_openstack_resources(
             logger,
             clouds,
@@ -452,7 +456,6 @@ async def _on_openstackcluster_event_impl(
             cacert,
             clustername,
             volumes_annotation_value == VOLUMES_ANNOTATION_DELETE,
-            remove_loadbalancers,
             remove_appcred and len(finalizers) == 1,
         )
 
