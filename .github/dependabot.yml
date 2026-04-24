@@ -1,21 +1,18 @@
----
-
 version: 2
-
 updates:
   # Automatically propose PRs for out-of-date GitHub actions
-  - package-ecosystem: github-actions
-    directory: "/"
-    schedule:
-      # Check for new versions weekly
-      interval: weekly
-    # Update all actions in a single PR
-    groups:
-      github-actions:
-        patterns: ["*"]
-    labels:
-      - automation
-      - gha-update
+  # - package-ecosystem: github-actions
+  #   directory: "/"
+  #   schedule:
+  #     # Check for new versions weekly
+  #     interval: weekly
+  #   # Update all actions in a single PR
+  #   groups:
+  #     github-actions:
+  #       patterns: ["*"]
+  #   labels:
+  #     - automation
+  #     - gha-update
 
   # Automatically propose PRs for Python dependencies
   - package-ecosystem: pip
@@ -30,5 +27,5 @@ updates:
       - automation
       - pip-update
     commit-message:
-    # Prefix all commit messages with "pip: "
+      # Prefix all commit messages with "pip: "
       prefix: "pip"
