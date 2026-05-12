@@ -12,11 +12,11 @@ frozenlist==1.8.0
 h11==0.16.0
 httpcore==1.0.9
 httpx==0.28.1
-idna==3.13
+idna==3.14
 iso8601==2.1.0
 kopf==1.44.5
 multidict==6.7.1
-propcache==0.4.1
+propcache==0.5.2
 python-json-logger==4.1.0
 PyYAML==6.0.3
 sniffio==1.3.1
