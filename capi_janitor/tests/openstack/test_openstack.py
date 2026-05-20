@@ -9,6 +9,7 @@ class TestCloudAsyncContext(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         # Auth is mocked to simulate authentication
         self.auth = MagicMock()
+        self.auth.url = "https://example.com:5000/identity"
         # Transport is awaited so can be Async Mocked
         self.transport = AsyncMock()
         # Interface & Region can be fixed for the tests
@@ -51,7 +52,13 @@ class TestCloudAsyncContext(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 cloud.api_client("compute")._base_url, "https://compute.example.com"
             )
-            mock_client_instance.get.assert_called_once_with("/v3/auth/catalog")
+            # Full URL must be used so the /identity path prefix is preserved.
+            # Client.__init__ strips the path into _prefix (not used by raw
+            # client.get()), so a relative "/v3/auth/catalog" would resolve
+            # against base_url "https://example.com:5000" and lose /identity.
+            mock_client_instance.get.assert_called_once_with(
+                "https://example.com:5000/identity/v3/auth/catalog"
+            )
 
     # Test the __aenter__ method for auth failure
     @patch("capi_janitor.openstack.openstack.Client")
