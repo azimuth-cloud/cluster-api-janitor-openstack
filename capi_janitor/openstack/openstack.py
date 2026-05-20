@@ -179,7 +179,10 @@ class Cloud:
             base_url=self._auth.url, auth=self._auth, transport=self._transport
         )
         try:
-            response = await client.get("/v3/auth/catalog")
+            # Use the full auth URL to avoid losing any path prefix (e.g.
+            # /identity) that Client.__init__ strips from the httpx base_url
+            # into _prefix, which raw client.get() calls do not prepend.
+            response = await client.get(f"{self._auth.url}/v3/auth/catalog")
         except httpx.HTTPStatusError as exc:
             # If the auth fails, we just have an empty app catalog
             if exc.response.status_code == 404:
