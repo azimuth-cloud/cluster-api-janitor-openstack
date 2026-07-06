@@ -167,7 +167,7 @@ async def try_delete(logger, resource, instances, **kwargs):
     return check_required
 
 
-async def purge_openstack_resources(  # noqa: C901
+async def purge_openstack_resources(
     logger,
     clouds,
     cloud_name,
