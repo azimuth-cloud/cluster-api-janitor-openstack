@@ -12,6 +12,9 @@ from capi_janitor.openstack.operator import OPENSTACK_USER_VOLUMES_RECLAIM_PROPE
 
 # Helper to create an async iterable
 class AsyncIterList:
+    singular_name = "resource"
+    plural_name = "resources"
+
     def __init__(self, items):
         self.items = items
         self.kwargs = None
@@ -52,7 +55,10 @@ class TestOperator(unittest.IsolatedAsyncioTestCase):
         resource_mock = AsyncIterList(fips)
 
         result = [
-            fip async for fip in operator.fips_for_cluster(resource_mock, "mycluster")
+            fip
+            async for fip in operator.fips_for_cluster(
+                mock.Mock(), resource_mock, "mycluster"
+            )
         ]
 
         self.assertEqual(len(result), 2)
@@ -75,7 +81,10 @@ class TestOperator(unittest.IsolatedAsyncioTestCase):
         resource_mock = AsyncIterList(lbs)
 
         result = [
-            lb async for lb in operator.lbs_for_cluster(resource_mock, "mycluster")
+            lb
+            async for lb in operator.lbs_for_cluster(
+                mock.Mock(), resource_mock, "mycluster"
+            )
         ]
 
         self.assertEqual(len(result), 2)
@@ -93,7 +102,9 @@ class TestOperator(unittest.IsolatedAsyncioTestCase):
         resource_mock = AsyncIterList(secgroups)
 
         result = []
-        async for sg in operator.secgroups_for_cluster(resource_mock, "mycluster"):
+        async for sg in operator.secgroups_for_cluster(
+            mock.Mock(), resource_mock, "mycluster"
+        ):
             result.append(sg)
 
         self.assertEqual(len(result), 2)
@@ -131,7 +142,7 @@ class TestOperator(unittest.IsolatedAsyncioTestCase):
 
         result = []
         async for vol in operator.filtered_volumes_for_cluster(
-            resource_mock, "mycluster"
+            mock.Mock(), resource_mock, "mycluster"
         ):
             result.append(vol)
 
@@ -151,7 +162,9 @@ class TestOperator(unittest.IsolatedAsyncioTestCase):
         resource_mock = AsyncIterList(snapshots)
 
         result = []
-        async for snap in operator.snapshots_for_cluster(resource_mock, "mycluster"):
+        async for snap in operator.snapshots_for_cluster(
+            mock.Mock(), resource_mock, "mycluster"
+        ):
             result.append(snap)
 
         self.assertEqual(len(result), 2)
@@ -333,7 +346,6 @@ class TestOperator(unittest.IsolatedAsyncioTestCase):
             None,
             "mycluster",
             True,
-            False,
             True,
         )
         mock_delete_secret.assert_awaited_once_with("appcred42", "namespace1")
@@ -386,7 +398,6 @@ class TestOperator(unittest.IsolatedAsyncioTestCase):
                 "openstack",
                 None,
                 "mycluster",
-                True,
                 True,
                 False,
             )
