@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -96,6 +97,12 @@ func (s *Session) IsAuthenticated() bool { return s.authenticated }
 // UserID returns the ID of the authenticated user.
 func (s *Session) UserID() string { return s.userID }
 
+// HasEndpoint reports whether the session has a discovered endpoint for the given service type.
+func (s *Session) HasEndpoint(serviceType string) bool {
+	_, ok := s.endpoints[serviceType]
+	return ok
+}
+
 // Authenticate performs token authentication against Keystone and discovers
 // the service catalog, returning a ready-to-use Session.
 func Authenticate(ctx context.Context, cloudsYAML, cloudName, cacert string) (*Session, error) {
@@ -172,7 +179,11 @@ func (s *Session) getToken(ctx context.Context, baseURL string, auth authBlock) 
 			} `json:"user"`
 		} `json:"token"`
 	}
-	return json.NewDecoder(resp.Body).Decode(&result)
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return err
+	}
+	s.userID = result.Token.User.ID
+	return nil
 }
 
 func (s *Session) loadCatalog(ctx context.Context, baseURL, iface, region string) error {
@@ -280,16 +291,8 @@ func (e *httpStatusError) StatusCode() int { return e.code }
 
 func isHTTP(err error, code int) bool {
 	var he *httpStatusError
-	if errors_as(err, &he) {
+	if errors.As(err, &he) {
 		return he.code == code
-	}
-	return false
-}
-
-func errors_as(err error, target **httpStatusError) bool {
-	if he, ok := err.(*httpStatusError); ok {
-		*target = he
-		return true
 	}
 	return false
 }
@@ -297,7 +300,7 @@ func errors_as(err error, target **httpStatusError) bool {
 // isTransient returns true for HTTP 400 and 409 (conflict/bad-request = retry).
 func isTransient(err error) bool {
 	var he *httpStatusError
-	if errors_as(err, &he) {
+	if errors.As(err, &he) {
 		return he.code == http.StatusBadRequest || he.code == http.StatusConflict
 	}
 	return false
