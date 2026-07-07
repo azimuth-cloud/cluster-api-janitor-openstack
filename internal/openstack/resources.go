@@ -32,11 +32,17 @@ func (s *Session) DeleteFloatingIPs(ctx context.Context, logger logr.Logger, clu
 	deleted := false
 	for _, f := range list {
 		if strings.HasPrefix(f.Description, prefix) && strings.HasSuffix(f.Description, suffix) {
-			logger.Info("deleting floating IP", "id", f.ID)
-			if err := s.doDelete(ctx, networkURL+"/v2.0/floatingips/"+f.ID); err != nil && !isTransient(err) {
-				return err
-			}
+			// Mark found before attempting deletion so verification always runs,
+			// even when the delete returns a transient error.
 			deleted = true
+			logger.Info("deleting floating IP", "id", f.ID)
+			if err := s.doDelete(ctx, networkURL+"/v2.0/floatingips/"+f.ID); err != nil {
+				if isTransient(err) {
+					logger.Info("transient error deleting floating IP, will verify", "id", f.ID, "error", err)
+				} else {
+					return err
+				}
+			}
 		}
 	}
 	if deleted {
