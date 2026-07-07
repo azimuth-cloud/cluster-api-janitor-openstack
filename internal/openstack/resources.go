@@ -82,12 +82,16 @@ func (s *Session) DeleteLoadBalancers(ctx context.Context, logger logr.Logger, c
 	deleted := false
 	for _, l := range list {
 		if strings.HasPrefix(l.Name, kubePrefix) {
+			deleted = true
 			logger.Info("deleting load balancer", "id", l.ID, "name", l.Name)
 			target := lbURL + "/v2/lbaas/loadbalancers/" + l.ID + "?cascade=true"
-			if err := s.doDelete(ctx, target); err != nil && !isTransient(err) {
-				return err
+			if err := s.doDelete(ctx, target); err != nil {
+				if isTransient(err) {
+					logger.Info("transient error deleting load balancer, will verify", "id", l.ID, "error", err)
+				} else {
+					return err
+				}
 			}
-			deleted = true
 		}
 	}
 	if deleted {
