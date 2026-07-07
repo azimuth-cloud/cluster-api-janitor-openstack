@@ -130,11 +130,15 @@ func (s *Session) DeleteSecurityGroups(ctx context.Context, logger logr.Logger, 
 	deleted := false
 	for _, g := range list {
 		if strings.HasPrefix(g.Description, "Security Group for") && strings.HasSuffix(g.Description, sgSuffix) {
-			logger.Info("deleting security group", "id", g.ID)
-			if err := s.doDelete(ctx, networkURL+"/v2.0/security-groups/"+g.ID); err != nil && !isTransient(err) {
-				return err
-			}
 			deleted = true
+			logger.Info("deleting security group", "id", g.ID)
+			if err := s.doDelete(ctx, networkURL+"/v2.0/security-groups/"+g.ID); err != nil {
+				if isTransient(err) {
+					logger.Info("transient error deleting security group, will verify", "id", g.ID, "error", err)
+				} else {
+					return err
+				}
+			}
 		}
 	}
 	if deleted {

@@ -777,6 +777,140 @@ func TestDeleteLoadBalancers_NothingToDelete_NoVerification(t *testing.T) {
 	}
 }
 
+// ── SG mock server ────────────────────────────────────────────────────────────
+
+type sgRecord struct {
+	ID          string `json:"id"`
+	Description string `json:"description"`
+}
+
+// sgTestServer is a mock OpenStack server that handles Keystone auth +
+// a Neutron-like security group API. The catalog advertises the server's own
+// URL as the "network" endpoint.
+type sgTestServer struct {
+	*httptest.Server
+	mu                 sync.Mutex
+	sgLists            [][]sgRecord
+	sgGetCount         int
+	listStatusOverride int // if non-zero, all GETs return this status
+	deleteStatus       map[string]int
+	deletedSGs         []string
+}
+
+func newSGTestServer(t *testing.T) *sgTestServer {
+	t.Helper()
+	srv := &sgTestServer{
+		deleteStatus: make(map[string]int),
+	}
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/v3/auth/tokens", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("X-Subject-Token", "test-sg-token")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"token": map[string]any{"user": map[string]any{"id": "test-user"}},
+		})
+	})
+
+	// Self-referential catalog: "network" endpoint = this server.
+	mux.HandleFunc("/v3/auth/catalog", func(w http.ResponseWriter, r *http.Request) {
+		selfURL := "http://" + r.Host
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"catalog": []any{
+				map[string]any{
+					"type": "network",
+					"endpoints": []any{
+						map[string]any{
+							"interface": "public",
+							"region_id": "RegionOne",
+							"url":       selfURL,
+						},
+					},
+				},
+			},
+		})
+	})
+
+	mux.HandleFunc("/v2.0/security-groups", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		srv.mu.Lock()
+		override := srv.listStatusOverride
+		srv.sgGetCount++
+		idx := srv.sgGetCount - 1
+		var list []sgRecord
+		if len(srv.sgLists) > 0 {
+			if idx < len(srv.sgLists) {
+				list = srv.sgLists[idx]
+			} else {
+				list = srv.sgLists[len(srv.sgLists)-1]
+			}
+		}
+		srv.mu.Unlock()
+		if override != 0 {
+			w.WriteHeader(override)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"security_groups": list})
+	})
+
+	mux.HandleFunc("/v2.0/security-groups/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		id := strings.TrimPrefix(r.URL.Path, "/v2.0/security-groups/")
+		srv.mu.Lock()
+		srv.deletedSGs = append(srv.deletedSGs, id)
+		status, ok := srv.deleteStatus[id]
+		if !ok {
+			status = http.StatusNoContent
+		}
+		srv.mu.Unlock()
+		w.WriteHeader(status)
+	})
+
+	srv.Server = httptest.NewServer(mux)
+	t.Cleanup(srv.Server.Close)
+	return srv
+}
+
+func (srv *sgTestServer) authenticate(t *testing.T) *openstack.Session {
+	t.Helper()
+	cloudsYAML := fmt.Sprintf(`
+clouds:
+  openstack:
+    auth_type: v3applicationcredential
+    auth:
+      auth_url: %s
+      application_credential_id: test-id
+      application_credential_secret: test-secret
+    interface: public
+    region_name: RegionOne
+`, srv.URL)
+	session, err := openstack.Authenticate(context.Background(), cloudsYAML, "openstack", "")
+	if err != nil {
+		t.Fatalf("authenticate: %v", err)
+	}
+	if !session.IsAuthenticated() {
+		t.Fatal("expected authenticated session with network endpoint")
+	}
+	return session
+}
+
+func sgDesc(cluster string) string {
+	return fmt.Sprintf("Security Group for Service LoadBalancer in cluster %s", cluster)
+}
+
 // Scenario: Pas d'endpoint "load-balancer" dans le catalogue → retour nil (LBs ignorés)
 func TestDeleteLoadBalancers_NoLoadBalancerEndpoint_Skips(t *testing.T) {
 	ks := newKeystoneServer(t)
@@ -795,5 +929,188 @@ func TestDeleteLoadBalancers_NoLoadBalancerEndpoint_Skips(t *testing.T) {
 	err = session.DeleteLoadBalancers(context.Background(), logr.Discard(), "mycluster")
 	if err != nil {
 		t.Fatalf("expected nil when load-balancer endpoint is absent, got: %v", err)
+	}
+}
+
+// ── Epic 4: Nettoyage des Security Groups ────────────────────────────────────
+
+// ── US4.1: Identifier les Security Groups d'un cluster ───────────────────────
+
+// Scenario: SG appartenant au cluster → inclus dans la suppression
+// Scenario: SG d'un autre cluster → exclu
+// Scenario: Description ne correspondant pas → exclu
+func TestDeleteSecurityGroups_Filtering(t *testing.T) {
+	tests := []struct {
+		name         string
+		description  string
+		cluster      string
+		shouldDelete bool
+	}{
+		{
+			name:         "matching cluster",
+			description:  sgDesc("mycluster"),
+			cluster:      "mycluster",
+			shouldDelete: true,
+		},
+		{
+			name:         "different cluster",
+			description:  sgDesc("othercluster"),
+			cluster:      "mycluster",
+			shouldDelete: false,
+		},
+		{
+			name:         "wrong prefix",
+			description:  "Group for Service LoadBalancer in cluster mycluster",
+			cluster:      "mycluster",
+			shouldDelete: false,
+		},
+		{
+			name:         "unrelated description",
+			description:  "Some other security group",
+			cluster:      "mycluster",
+			shouldDelete: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := newSGTestServer(t)
+			sg := sgRecord{ID: "sg-001", Description: tt.description}
+			srv.sgLists = [][]sgRecord{{sg}, {}}
+
+			session := srv.authenticate(t)
+			if err := session.DeleteSecurityGroups(context.Background(), logr.Discard(), tt.cluster); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			srv.mu.Lock()
+			deleted := len(srv.deletedSGs) > 0
+			srv.mu.Unlock()
+
+			if deleted != tt.shouldDelete {
+				t.Errorf("shouldDelete=%v but SG was deleted=%v", tt.shouldDelete, deleted)
+			}
+		})
+	}
+}
+
+// ── US4.2: Supprimer les Security Groups ──────────────────────────────────────
+
+// Scenario: Suppression réussie
+func TestDeleteSecurityGroups_SuccessfulDeletion(t *testing.T) {
+	srv := newSGTestServer(t)
+	sgs := []sgRecord{
+		{ID: "sg-001", Description: sgDesc("mycluster")},
+		{ID: "sg-002", Description: sgDesc("mycluster")},
+	}
+	srv.sgLists = [][]sgRecord{sgs, {}}
+
+	session := srv.authenticate(t)
+	if err := session.DeleteSecurityGroups(context.Background(), logr.Discard(), "mycluster"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	srv.mu.Lock()
+	deletedIDs := srv.deletedSGs
+	srv.mu.Unlock()
+
+	if len(deletedIDs) != 2 {
+		t.Errorf("expected 2 SGs deleted, got %d: %v", len(deletedIDs), deletedIDs)
+	}
+	idSet := make(map[string]bool)
+	for _, id := range deletedIDs {
+		idSet[id] = true
+	}
+	for _, sg := range sgs {
+		if !idSet[sg.ID] {
+			t.Errorf("expected SG %s to be deleted", sg.ID)
+		}
+	}
+}
+
+// Scenario: SG encore utilisé (HTTP 409) → warning, continue, vérification déclenchée
+func TestDeleteSecurityGroups_TransientError409_ContinuesAndVerifies(t *testing.T) {
+	srv := newSGTestServer(t)
+	sgs := []sgRecord{
+		{ID: "sg-001", Description: sgDesc("mycluster")}, // returns HTTP 409
+		{ID: "sg-002", Description: sgDesc("mycluster")}, // returns HTTP 204
+	}
+	srv.sgLists = [][]sgRecord{sgs, {}}
+	srv.deleteStatus["sg-001"] = http.StatusConflict
+
+	session := srv.authenticate(t)
+	err := session.DeleteSecurityGroups(context.Background(), logr.Discard(), "mycluster")
+
+	if err != nil {
+		t.Fatalf("expected no error for transient HTTP 409, got: %v", err)
+	}
+
+	srv.mu.Lock()
+	attempted := len(srv.deletedSGs)
+	getCount := srv.sgGetCount
+	srv.mu.Unlock()
+
+	if attempted != 2 {
+		t.Errorf("expected both SGs to be attempted, got %d DELETE calls", attempted)
+	}
+	// Verification GET must have been triggered (deleted=true even on transient error)
+	if getCount < 2 {
+		t.Errorf("expected at least 2 GET calls (list + verification), got %d", getCount)
+	}
+}
+
+// Scenario: Erreur HTTP 500 → exception propagée
+func TestDeleteSecurityGroups_HTTP500_PropagatesError(t *testing.T) {
+	srv := newSGTestServer(t)
+	srv.sgLists = [][]sgRecord{
+		{{ID: "sg-server-error", Description: sgDesc("mycluster")}},
+	}
+	srv.deleteStatus["sg-server-error"] = http.StatusInternalServerError
+
+	session := srv.authenticate(t)
+	err := session.DeleteSecurityGroups(context.Background(), logr.Discard(), "mycluster")
+
+	if err == nil {
+		t.Fatal("expected error for HTTP 500, got nil")
+	}
+}
+
+// Scenario: SGs toujours présents après suppression → erreur retournée
+func TestDeleteSecurityGroups_StillPresentAfterDeletion_ReturnsError(t *testing.T) {
+	srv := newSGTestServer(t)
+	sg := sgRecord{ID: "sg-persistent", Description: sgDesc("mycluster")}
+	srv.sgLists = [][]sgRecord{{sg}, {sg}}
+
+	session := srv.authenticate(t)
+	err := session.DeleteSecurityGroups(context.Background(), logr.Discard(), "mycluster")
+
+	if err == nil {
+		t.Fatal("expected error when SG persists after deletion")
+	}
+	if !strings.Contains(err.Error(), "mycluster") {
+		t.Errorf("expected error to mention cluster name, got: %v", err)
+	}
+}
+
+// Scenario: Aucun SG correspondant → pas de suppression, pas de vérification
+func TestDeleteSecurityGroups_NothingToDelete_NoVerification(t *testing.T) {
+	srv := newSGTestServer(t)
+	srv.sgLists = [][]sgRecord{{}}
+
+	session := srv.authenticate(t)
+	if err := session.DeleteSecurityGroups(context.Background(), logr.Discard(), "mycluster"); err != nil {
+		t.Fatalf("unexpected error with no SGs: %v", err)
+	}
+
+	srv.mu.Lock()
+	deletedCount := len(srv.deletedSGs)
+	getCount := srv.sgGetCount
+	srv.mu.Unlock()
+
+	if deletedCount != 0 {
+		t.Errorf("expected no DELETE calls, got %d: %v", deletedCount, srv.deletedSGs)
+	}
+	if getCount != 1 {
+		t.Errorf("expected exactly 1 GET call (no verification), got %d", getCount)
 	}
 }
