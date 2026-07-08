@@ -216,11 +216,15 @@ func (s *Session) DeleteVolumes(ctx context.Context, logger logr.Logger, cluster
 		if vol.Metadata[KeepProperty] == "true" {
 			continue
 		}
-		logger.Info("deleting volume", "id", vol.ID)
-		if err := s.doDelete(ctx, cinderURL+"/volumes/"+vol.ID); err != nil && !isTransient(err) {
-			return err
-		}
 		deleted = true
+		logger.Info("deleting volume", "id", vol.ID)
+		if err := s.doDelete(ctx, cinderURL+"/volumes/"+vol.ID); err != nil {
+			if isTransient(err) {
+				logger.Info("transient error deleting volume, will verify", "id", vol.ID, "error", err)
+			} else {
+				return err
+			}
+		}
 	}
 	if deleted {
 		remaining, err := s.listVolumeItems(ctx, cinderURL+"/volumes/detail", "volumes")

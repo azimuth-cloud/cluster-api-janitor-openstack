@@ -1114,3 +1114,316 @@ func TestDeleteSecurityGroups_NothingToDelete_NoVerification(t *testing.T) {
 		t.Errorf("expected exactly 1 GET call (no verification), got %d", getCount)
 	}
 }
+
+// ── Cinder Volume mock server ─────────────────────────────────────────────────
+
+type cinderVolumeRecord struct {
+	ID       string            `json:"id"`
+	Metadata map[string]string `json:"metadata"`
+}
+
+// cinderTestServer is a mock OpenStack server that handles Keystone auth +
+// a Cinder-like volumes API. The catalog advertises the server's own URL as
+// the "volumev3" endpoint (first type checked by cinderEndpoint).
+type cinderTestServer struct {
+	*httptest.Server
+	mu             sync.Mutex
+	volumeLists    [][]cinderVolumeRecord // sequence of list responses; last entry is reused
+	volumeGetCount int
+	deleteStatus   map[string]int
+	deletedVolumes []string
+}
+
+func newCinderTestServer(t *testing.T) *cinderTestServer {
+	t.Helper()
+	srv := &cinderTestServer{
+		deleteStatus: make(map[string]int),
+	}
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/v3/auth/tokens", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("X-Subject-Token", "test-cinder-token")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"token": map[string]any{"user": map[string]any{"id": "test-user"}},
+		})
+	})
+
+	// Self-referential catalog: "volumev3" endpoint = this server.
+	mux.HandleFunc("/v3/auth/catalog", func(w http.ResponseWriter, r *http.Request) {
+		selfURL := "http://" + r.Host
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"catalog": []any{
+				map[string]any{
+					"type": "volumev3",
+					"endpoints": []any{
+						map[string]any{
+							"interface": "public",
+							"region_id": "RegionOne",
+							"url":       selfURL,
+						},
+					},
+				},
+			},
+		})
+	})
+
+	// Cinder: list volumes (exact path — takes priority over /volumes/ subtree)
+	mux.HandleFunc("/volumes/detail", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		srv.mu.Lock()
+		srv.volumeGetCount++
+		idx := srv.volumeGetCount - 1
+		var list []cinderVolumeRecord
+		if len(srv.volumeLists) > 0 {
+			if idx < len(srv.volumeLists) {
+				list = srv.volumeLists[idx]
+			} else {
+				list = srv.volumeLists[len(srv.volumeLists)-1]
+			}
+		}
+		srv.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"volumes": list})
+	})
+
+	// Cinder: delete volume by ID (subtree pattern handles /volumes/{id})
+	mux.HandleFunc("/volumes/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		id := strings.TrimPrefix(r.URL.Path, "/volumes/")
+		srv.mu.Lock()
+		srv.deletedVolumes = append(srv.deletedVolumes, id)
+		status, ok := srv.deleteStatus[id]
+		if !ok {
+			status = http.StatusNoContent
+		}
+		srv.mu.Unlock()
+		w.WriteHeader(status)
+	})
+
+	srv.Server = httptest.NewServer(mux)
+	t.Cleanup(srv.Server.Close)
+	return srv
+}
+
+func (srv *cinderTestServer) authenticate(t *testing.T) *openstack.Session {
+	t.Helper()
+	cloudsYAML := fmt.Sprintf(`
+clouds:
+  openstack:
+    auth_type: v3applicationcredential
+    auth:
+      auth_url: %s
+      application_credential_id: test-id
+      application_credential_secret: test-secret
+    interface: public
+    region_name: RegionOne
+`, srv.URL)
+	session, err := openstack.Authenticate(context.Background(), cloudsYAML, "openstack", "")
+	if err != nil {
+		t.Fatalf("authenticate: %v", err)
+	}
+	if !session.IsAuthenticated() {
+		t.Fatal("expected authenticated session with volumev3 endpoint")
+	}
+	return session
+}
+
+// ── Epic 5: Gestion des Volumes Cinder ───────────────────────────────────────
+
+// ── US5.1: Identifier les volumes d'un cluster ───────────────────────────────
+
+// Scenario: Volume du bon cluster sans keep → supprimé
+// Scenario: Volume avec keep=true → conservé
+// Scenario: Volume d'un autre cluster → exclu
+// Scenario: Volume sans métadonnée CSI → exclu
+func TestDeleteVolumes_Filtering(t *testing.T) {
+	tests := []struct {
+		name         string
+		metadata     map[string]string
+		cluster      string
+		shouldDelete bool
+	}{
+		{
+			name:         "matching cluster, no keep",
+			metadata:     map[string]string{"cinder.csi.openstack.org/cluster": "mycluster"},
+			cluster:      "mycluster",
+			shouldDelete: true,
+		},
+		{
+			name: "matching cluster, keep=true",
+			metadata: map[string]string{
+				"cinder.csi.openstack.org/cluster":    "mycluster",
+				"janitor.capi.azimuth-cloud.com/keep": "true",
+			},
+			cluster:      "mycluster",
+			shouldDelete: false,
+		},
+		{
+			name:         "different cluster",
+			metadata:     map[string]string{"cinder.csi.openstack.org/cluster": "othercluster"},
+			cluster:      "mycluster",
+			shouldDelete: false,
+		},
+		{
+			name:         "no CSI metadata",
+			metadata:     map[string]string{},
+			cluster:      "mycluster",
+			shouldDelete: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := newCinderTestServer(t)
+			vol := cinderVolumeRecord{ID: "vol-001", Metadata: tt.metadata}
+			srv.volumeLists = [][]cinderVolumeRecord{{vol}, {}}
+
+			session := srv.authenticate(t)
+			if err := session.DeleteVolumes(context.Background(), logr.Discard(), tt.cluster); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			srv.mu.Lock()
+			deleted := len(srv.deletedVolumes) > 0
+			srv.mu.Unlock()
+
+			if deleted != tt.shouldDelete {
+				t.Errorf("shouldDelete=%v but volume was deleted=%v", tt.shouldDelete, deleted)
+			}
+		})
+	}
+}
+
+// Scenario: Suppression réussie de plusieurs volumes
+func TestDeleteVolumes_SuccessfulDeletion(t *testing.T) {
+	srv := newCinderTestServer(t)
+	vols := []cinderVolumeRecord{
+		{ID: "vol-001", Metadata: map[string]string{"cinder.csi.openstack.org/cluster": "mycluster"}},
+		{ID: "vol-002", Metadata: map[string]string{"cinder.csi.openstack.org/cluster": "mycluster"}},
+	}
+	srv.volumeLists = [][]cinderVolumeRecord{vols, {}}
+
+	session := srv.authenticate(t)
+	if err := session.DeleteVolumes(context.Background(), logr.Discard(), "mycluster"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	srv.mu.Lock()
+	deletedIDs := srv.deletedVolumes
+	srv.mu.Unlock()
+
+	if len(deletedIDs) != 2 {
+		t.Errorf("expected 2 volumes deleted, got %d: %v", len(deletedIDs), deletedIDs)
+	}
+	idSet := make(map[string]bool)
+	for _, id := range deletedIDs {
+		idSet[id] = true
+	}
+	for _, vol := range vols {
+		if !idSet[vol.ID] {
+			t.Errorf("expected volume %s to be deleted", vol.ID)
+		}
+	}
+}
+
+// Scenario: Erreur HTTP 409 (transiente) → warning, continue, vérification déclenchée
+func TestDeleteVolumes_TransientError409_ContinuesAndVerifies(t *testing.T) {
+	srv := newCinderTestServer(t)
+	vols := []cinderVolumeRecord{
+		{ID: "vol-001", Metadata: map[string]string{"cinder.csi.openstack.org/cluster": "mycluster"}},
+		{ID: "vol-002", Metadata: map[string]string{"cinder.csi.openstack.org/cluster": "mycluster"}},
+	}
+	srv.volumeLists = [][]cinderVolumeRecord{vols, {}}
+	srv.deleteStatus["vol-001"] = http.StatusConflict
+
+	session := srv.authenticate(t)
+	err := session.DeleteVolumes(context.Background(), logr.Discard(), "mycluster")
+
+	if err != nil {
+		t.Fatalf("expected no error for transient HTTP 409, got: %v", err)
+	}
+
+	srv.mu.Lock()
+	attempted := len(srv.deletedVolumes)
+	getCount := srv.volumeGetCount
+	srv.mu.Unlock()
+
+	if attempted != 2 {
+		t.Errorf("expected both volumes to be attempted, got %d DELETE calls", attempted)
+	}
+	if getCount < 2 {
+		t.Errorf("expected at least 2 GET calls (list + verification), got %d", getCount)
+	}
+}
+
+// Scenario: Erreur HTTP 500 → exception propagée
+func TestDeleteVolumes_HTTP500_PropagatesError(t *testing.T) {
+	srv := newCinderTestServer(t)
+	srv.volumeLists = [][]cinderVolumeRecord{
+		{{ID: "vol-server-error", Metadata: map[string]string{"cinder.csi.openstack.org/cluster": "mycluster"}}},
+	}
+	srv.deleteStatus["vol-server-error"] = http.StatusInternalServerError
+
+	session := srv.authenticate(t)
+	err := session.DeleteVolumes(context.Background(), logr.Discard(), "mycluster")
+
+	if err == nil {
+		t.Fatal("expected error for HTTP 500, got nil")
+	}
+}
+
+// Scenario: Volume toujours présent après suppression → erreur retournée
+func TestDeleteVolumes_StillPresentAfterDeletion_ReturnsError(t *testing.T) {
+	srv := newCinderTestServer(t)
+	vol := cinderVolumeRecord{
+		ID:       "vol-persistent",
+		Metadata: map[string]string{"cinder.csi.openstack.org/cluster": "mycluster"},
+	}
+	srv.volumeLists = [][]cinderVolumeRecord{{vol}, {vol}}
+
+	session := srv.authenticate(t)
+	err := session.DeleteVolumes(context.Background(), logr.Discard(), "mycluster")
+
+	if err == nil {
+		t.Fatal("expected error when volume persists after deletion")
+	}
+	if !strings.Contains(err.Error(), "mycluster") {
+		t.Errorf("expected error to mention cluster name, got: %v", err)
+	}
+}
+
+// Scenario: Aucun volume correspondant → pas de suppression, pas de vérification
+func TestDeleteVolumes_NothingToDelete_NoVerification(t *testing.T) {
+	srv := newCinderTestServer(t)
+	srv.volumeLists = [][]cinderVolumeRecord{{}}
+
+	session := srv.authenticate(t)
+	if err := session.DeleteVolumes(context.Background(), logr.Discard(), "mycluster"); err != nil {
+		t.Fatalf("unexpected error with no volumes: %v", err)
+	}
+
+	srv.mu.Lock()
+	deletedCount := len(srv.deletedVolumes)
+	getCount := srv.volumeGetCount
+	srv.mu.Unlock()
+
+	if deletedCount != 0 {
+		t.Errorf("expected no DELETE calls, got %d: %v", deletedCount, srv.deletedVolumes)
+	}
+	if getCount != 1 {
+		t.Errorf("expected exactly 1 GET call (no verification), got %d", getCount)
+	}
+}
