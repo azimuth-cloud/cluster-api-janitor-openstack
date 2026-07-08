@@ -27,6 +27,20 @@ spec:
           env:
             - name: CAPI_JANITOR_DEFAULT_VOLUMES_POLICY
               value: {{ .Values.defaultVolumesPolicy }}
+            - name: CAPI_JANITOR_RETRY_DEFAULT_DELAY
+              value: {{ .Values.retryDefaultDelay | quote }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8081
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8081
+            initialDelaySeconds: 5
+            periodSeconds: 10
           resources: {{ toYaml .Values.resources | nindent 12 }}
           volumeMounts:
             - name: tmp

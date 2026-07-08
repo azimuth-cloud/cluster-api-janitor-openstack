@@ -1,6 +1,9 @@
 # The default volumes policy for the operator
 defaultVolumesPolicy: delete
 
+# The default retry delay in seconds after a failed cleanup attempt
+retryDefaultDelay: 60
+
 # The image to use for the operator
 image:
   repository: ghcr.io/azimuth-cloud/cluster-api-janitor-openstack

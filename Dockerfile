@@ -1,42 +1,15 @@
-FROM ubuntu:24.04 AS python-builder
+FROM golang:1.26 AS builder
+ARG TARGETOS
+ARG TARGETARCH
+WORKDIR /workspace
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
+    go build -a -o manager ./cmd/main.go
 
-RUN apt-get update && \
-    apt-get install -y python3 python3-venv
-
-RUN python3 -m venv /venv && \
-    /venv/bin/pip install -U pip setuptools
-
-COPY requirements.txt /app/requirements.txt
-RUN  /venv/bin/pip install --requirement /app/requirements.txt
-
-COPY . /app
-RUN /venv/bin/pip install /app
-
-
-FROM ubuntu:24.04
-
-# Don't buffer stdout and stderr as it breaks realtime logging
-ENV PYTHONUNBUFFERED=1
-
-# Create the user that will be used to run the app
-ENV APP_UID=1001
-ENV APP_GID=1001
-ENV APP_USER=app
-ENV APP_GROUP=app
-RUN groupadd --gid $APP_GID $APP_GROUP && \
-    useradd \
-      --no-create-home \
-      --no-user-group \
-      --gid $APP_GID \
-      --shell /sbin/nologin \
-      --uid $APP_UID \
-      $APP_USER
-
-RUN apt-get update && \
-    apt-get install -y ca-certificates python3 tini && \
-    rm -rf /var/lib/apt/lists/*
-
-COPY --from=python-builder /venv /venv
-
-USER $APP_UID
-CMD ["/venv/bin/kopf", "run", "--module", "capi_janitor.openstack.operator", "--all-namespaces", "--verbose"]
+FROM gcr.io/distroless/static:nonroot
+WORKDIR /
+COPY --from=builder /workspace/manager .
+USER 65532:65532
+ENTRYPOINT ["/manager"]
