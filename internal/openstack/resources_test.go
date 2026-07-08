@@ -1701,6 +1701,187 @@ func TestDeleteSnapshots_StillPresentAfterDeletion_ReturnsError(t *testing.T) {
 	}
 }
 
+// ── Identity (AppCredential) mock server ──────────────────────────────────────
+
+// identityTestServer is a mock OpenStack server handling Keystone auth +
+// the Identity API for application credentials. The catalog advertises the
+// server's own URL as the "identity" endpoint.
+type identityTestServer struct {
+	*httptest.Server
+	mu               sync.Mutex
+	deleteStatus     int // HTTP status for the DELETE request; 0 means 204
+	deletedAppcredID string
+}
+
+func newIdentityTestServer(t *testing.T) *identityTestServer {
+	t.Helper()
+	srv := &identityTestServer{}
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/v3/auth/tokens", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("X-Subject-Token", "test-identity-token")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"token": map[string]any{"user": map[string]any{"id": "test-user"}},
+		})
+	})
+
+	// Self-referential catalog: "identity" endpoint = this server.
+	mux.HandleFunc("/v3/auth/catalog", func(w http.ResponseWriter, r *http.Request) {
+		selfURL := "http://" + r.Host
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"catalog": []any{
+				map[string]any{
+					"type": "identity",
+					"endpoints": []any{
+						map[string]any{
+							"interface": "public",
+							"region_id": "RegionOne",
+							"url":       selfURL,
+						},
+					},
+				},
+			},
+		})
+	})
+
+	// Identity: DELETE /v3/users/{userID}/application_credentials/{appcredID}
+	mux.HandleFunc("/v3/users/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		parts := strings.Split(r.URL.Path, "/application_credentials/")
+		srv.mu.Lock()
+		if len(parts) == 2 {
+			srv.deletedAppcredID = parts[1]
+		}
+		status := srv.deleteStatus
+		if status == 0 {
+			status = http.StatusNoContent
+		}
+		srv.mu.Unlock()
+		w.WriteHeader(status)
+	})
+
+	srv.Server = httptest.NewServer(mux)
+	t.Cleanup(srv.Server.Close)
+	return srv
+}
+
+// authenticate returns both the session and the cloudsYAML used to build it,
+// so the same YAML can be passed to DeleteAppCredential.
+func (srv *identityTestServer) authenticate(t *testing.T) (*openstack.Session, string) {
+	t.Helper()
+	cloudsYAML := fmt.Sprintf(`
+clouds:
+  openstack:
+    auth_type: v3applicationcredential
+    auth:
+      auth_url: %s
+      application_credential_id: test-appcred-id
+      application_credential_secret: test-secret
+    interface: public
+    region_name: RegionOne
+`, srv.URL)
+	session, err := openstack.Authenticate(context.Background(), cloudsYAML, "openstack", "")
+	if err != nil {
+		t.Fatalf("authenticate: %v", err)
+	}
+	if !session.IsAuthenticated() {
+		t.Fatal("expected authenticated session with identity endpoint")
+	}
+	return session, cloudsYAML
+}
+
+// ── Epic 7: Gestion des Application Credentials ───────────────────────────────
+
+// ── US7.1: Supprimer l'Application Credential OpenStack ──────────────────────
+
+// Scenario: Suppression autorisée → HTTP 204, retour nil
+func TestDeleteAppCredential_SuccessfulDeletion(t *testing.T) {
+	srv := newIdentityTestServer(t)
+	session, cloudsYAML := srv.authenticate(t)
+
+	if err := session.DeleteAppCredential(context.Background(), logr.Discard(), cloudsYAML, "openstack"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	srv.mu.Lock()
+	deleted := srv.deletedAppcredID
+	srv.mu.Unlock()
+
+	if deleted != "test-appcred-id" {
+		t.Errorf("expected appcred-id %q to be deleted, got %q", "test-appcred-id", deleted)
+	}
+}
+
+// Scenario: Application Credential déjà supprimé → HTTP 404, retour nil
+func TestDeleteAppCredential_AlreadyDeleted_404(t *testing.T) {
+	srv := newIdentityTestServer(t)
+	srv.deleteStatus = http.StatusNotFound
+	session, cloudsYAML := srv.authenticate(t)
+
+	if err := session.DeleteAppCredential(context.Background(), logr.Discard(), cloudsYAML, "openstack"); err != nil {
+		t.Fatalf("expected nil for HTTP 404 (already deleted), got: %v", err)
+	}
+}
+
+// Scenario: Application Credential non supprimable (403) → warning, retour nil
+func TestDeleteAppCredential_Forbidden_403(t *testing.T) {
+	srv := newIdentityTestServer(t)
+	srv.deleteStatus = http.StatusForbidden
+	session, cloudsYAML := srv.authenticate(t)
+
+	if err := session.DeleteAppCredential(context.Background(), logr.Discard(), cloudsYAML, "openstack"); err != nil {
+		t.Fatalf("expected nil for HTTP 403 (restricted), got: %v", err)
+	}
+}
+
+// Scenario: Erreur HTTP 500 → erreur propagée
+func TestDeleteAppCredential_HTTP500_PropagatesError(t *testing.T) {
+	srv := newIdentityTestServer(t)
+	srv.deleteStatus = http.StatusInternalServerError
+	session, cloudsYAML := srv.authenticate(t)
+
+	err := session.DeleteAppCredential(context.Background(), logr.Discard(), cloudsYAML, "openstack")
+	if err == nil {
+		t.Fatal("expected error for HTTP 500, got nil")
+	}
+}
+
+// Scenario: Pas d'endpoint "identity" dans le catalogue → CatalogError
+func TestDeleteAppCredential_NoIdentityEndpoint_ReturnsCatalogError(t *testing.T) {
+	ks := newKeystoneServer(t)
+	ks.catalog = catalogWith(
+		serviceEntry("network",
+			endpoint("public", "RegionOne", "http://network.example.com"),
+		),
+	)
+
+	clouds := buildCloudsYAML(ks.URL, "v3applicationcredential")
+	session, err := openstack.Authenticate(context.Background(), clouds, "openstack", "")
+	if err != nil {
+		t.Fatalf("unexpected authenticate error: %v", err)
+	}
+
+	err = session.DeleteAppCredential(context.Background(), logr.Discard(), clouds, "openstack")
+
+	if err == nil {
+		t.Fatal("expected CatalogError when identity endpoint is absent")
+	}
+	var target *openstack.CatalogError
+	if !errorAs(err, &target) {
+		t.Errorf("expected *CatalogError, got %T: %v", err, err)
+	}
+}
+
 // Scenario: Aucun snapshot correspondant → pas de suppression, pas de vérification
 func TestDeleteSnapshots_NothingToDelete_NoVerification(t *testing.T) {
 	srv := newSnapshotTestServer(t)
