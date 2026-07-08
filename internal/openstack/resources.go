@@ -175,11 +175,15 @@ func (s *Session) DeleteSnapshots(ctx context.Context, logger logr.Logger, clust
 	deleted := false
 	for _, snap := range list {
 		if snap.Metadata["cinder.csi.openstack.org/cluster"] == cluster {
-			logger.Info("deleting snapshot", "id", snap.ID)
-			if err := s.doDelete(ctx, cinderURL+"/snapshots/"+snap.ID); err != nil && !isTransient(err) {
-				return err
-			}
 			deleted = true
+			logger.Info("deleting snapshot", "id", snap.ID)
+			if err := s.doDelete(ctx, cinderURL+"/snapshots/"+snap.ID); err != nil {
+				if isTransient(err) {
+					logger.Info("transient error deleting snapshot, will verify", "id", snap.ID, "error", err)
+				} else {
+					return err
+				}
+			}
 		}
 	}
 	if deleted {

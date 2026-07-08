@@ -1427,3 +1427,299 @@ func TestDeleteVolumes_NothingToDelete_NoVerification(t *testing.T) {
 		t.Errorf("expected exactly 1 GET call (no verification), got %d", getCount)
 	}
 }
+
+// ── Cinder Snapshot mock server ───────────────────────────────────────────────
+
+// snapshotTestServer is a mock OpenStack server handling Keystone auth +
+// a Cinder-like snapshots API. Catalog advertises the server's own URL as
+// the "volumev3" endpoint (same as volumes — same Cinder service).
+type snapshotTestServer struct {
+	*httptest.Server
+	mu               sync.Mutex
+	snapshotLists    [][]cinderVolumeRecord // reuse volumeItem shape (id + metadata)
+	snapshotGetCount int
+	deleteStatus     map[string]int
+	deletedSnapshots []string
+}
+
+func newSnapshotTestServer(t *testing.T) *snapshotTestServer {
+	t.Helper()
+	srv := &snapshotTestServer{
+		deleteStatus: make(map[string]int),
+	}
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/v3/auth/tokens", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("X-Subject-Token", "test-snapshot-token")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"token": map[string]any{"user": map[string]any{"id": "test-user"}},
+		})
+	})
+
+	mux.HandleFunc("/v3/auth/catalog", func(w http.ResponseWriter, r *http.Request) {
+		selfURL := "http://" + r.Host
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"catalog": []any{
+				map[string]any{
+					"type": "volumev3",
+					"endpoints": []any{
+						map[string]any{
+							"interface": "public",
+							"region_id": "RegionOne",
+							"url":       selfURL,
+						},
+					},
+				},
+			},
+		})
+	})
+
+	// Cinder: list snapshots (exact path — takes priority over /snapshots/ subtree)
+	mux.HandleFunc("/snapshots/detail", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		srv.mu.Lock()
+		srv.snapshotGetCount++
+		idx := srv.snapshotGetCount - 1
+		var list []cinderVolumeRecord
+		if len(srv.snapshotLists) > 0 {
+			if idx < len(srv.snapshotLists) {
+				list = srv.snapshotLists[idx]
+			} else {
+				list = srv.snapshotLists[len(srv.snapshotLists)-1]
+			}
+		}
+		srv.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"snapshots": list})
+	})
+
+	// Cinder: delete snapshot by ID (subtree pattern handles /snapshots/{id})
+	mux.HandleFunc("/snapshots/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		id := strings.TrimPrefix(r.URL.Path, "/snapshots/")
+		srv.mu.Lock()
+		srv.deletedSnapshots = append(srv.deletedSnapshots, id)
+		status, ok := srv.deleteStatus[id]
+		if !ok {
+			status = http.StatusNoContent
+		}
+		srv.mu.Unlock()
+		w.WriteHeader(status)
+	})
+
+	srv.Server = httptest.NewServer(mux)
+	t.Cleanup(srv.Server.Close)
+	return srv
+}
+
+func (srv *snapshotTestServer) authenticate(t *testing.T) *openstack.Session {
+	t.Helper()
+	cloudsYAML := fmt.Sprintf(`
+clouds:
+  openstack:
+    auth_type: v3applicationcredential
+    auth:
+      auth_url: %s
+      application_credential_id: test-id
+      application_credential_secret: test-secret
+    interface: public
+    region_name: RegionOne
+`, srv.URL)
+	session, err := openstack.Authenticate(context.Background(), cloudsYAML, "openstack", "")
+	if err != nil {
+		t.Fatalf("authenticate: %v", err)
+	}
+	if !session.IsAuthenticated() {
+		t.Fatal("expected authenticated session with volumev3 endpoint")
+	}
+	return session
+}
+
+// ── Epic 6: Gestion des Snapshots Cinder ─────────────────────────────────────
+
+// ── US6.1: Identifier et supprimer les snapshots d'un cluster ────────────────
+
+// Scenario: Snapshot du bon cluster → supprimé
+// Scenario: Snapshot d'un autre cluster → exclu
+func TestDeleteSnapshots_Filtering(t *testing.T) {
+	tests := []struct {
+		name         string
+		metadata     map[string]string
+		cluster      string
+		shouldDelete bool
+	}{
+		{
+			name:         "matching cluster",
+			metadata:     map[string]string{"cinder.csi.openstack.org/cluster": "mycluster"},
+			cluster:      "mycluster",
+			shouldDelete: true,
+		},
+		{
+			name:         "different cluster",
+			metadata:     map[string]string{"cinder.csi.openstack.org/cluster": "othercluster"},
+			cluster:      "mycluster",
+			shouldDelete: false,
+		},
+		{
+			name:         "no CSI metadata",
+			metadata:     map[string]string{},
+			cluster:      "mycluster",
+			shouldDelete: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := newSnapshotTestServer(t)
+			snap := cinderVolumeRecord{ID: "snap-001", Metadata: tt.metadata}
+			srv.snapshotLists = [][]cinderVolumeRecord{{snap}, {}}
+
+			session := srv.authenticate(t)
+			if err := session.DeleteSnapshots(context.Background(), logr.Discard(), tt.cluster); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			srv.mu.Lock()
+			deleted := len(srv.deletedSnapshots) > 0
+			srv.mu.Unlock()
+
+			if deleted != tt.shouldDelete {
+				t.Errorf("shouldDelete=%v but snapshot was deleted=%v", tt.shouldDelete, deleted)
+			}
+		})
+	}
+}
+
+// Scenario: Suppression réussie de plusieurs snapshots
+func TestDeleteSnapshots_SuccessfulDeletion(t *testing.T) {
+	srv := newSnapshotTestServer(t)
+	snaps := []cinderVolumeRecord{
+		{ID: "snap-001", Metadata: map[string]string{"cinder.csi.openstack.org/cluster": "mycluster"}},
+		{ID: "snap-002", Metadata: map[string]string{"cinder.csi.openstack.org/cluster": "mycluster"}},
+	}
+	srv.snapshotLists = [][]cinderVolumeRecord{snaps, {}}
+
+	session := srv.authenticate(t)
+	if err := session.DeleteSnapshots(context.Background(), logr.Discard(), "mycluster"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	srv.mu.Lock()
+	deletedIDs := srv.deletedSnapshots
+	srv.mu.Unlock()
+
+	if len(deletedIDs) != 2 {
+		t.Errorf("expected 2 snapshots deleted, got %d: %v", len(deletedIDs), deletedIDs)
+	}
+	idSet := make(map[string]bool)
+	for _, id := range deletedIDs {
+		idSet[id] = true
+	}
+	for _, snap := range snaps {
+		if !idSet[snap.ID] {
+			t.Errorf("expected snapshot %s to be deleted", snap.ID)
+		}
+	}
+}
+
+// Scenario: Erreur HTTP 409 (transiente) → warning, continue, vérification déclenchée
+func TestDeleteSnapshots_TransientError409_ContinuesAndVerifies(t *testing.T) {
+	srv := newSnapshotTestServer(t)
+	snaps := []cinderVolumeRecord{
+		{ID: "snap-001", Metadata: map[string]string{"cinder.csi.openstack.org/cluster": "mycluster"}},
+		{ID: "snap-002", Metadata: map[string]string{"cinder.csi.openstack.org/cluster": "mycluster"}},
+	}
+	srv.snapshotLists = [][]cinderVolumeRecord{snaps, {}}
+	srv.deleteStatus["snap-001"] = http.StatusConflict
+
+	session := srv.authenticate(t)
+	err := session.DeleteSnapshots(context.Background(), logr.Discard(), "mycluster")
+
+	if err != nil {
+		t.Fatalf("expected no error for transient HTTP 409, got: %v", err)
+	}
+
+	srv.mu.Lock()
+	attempted := len(srv.deletedSnapshots)
+	getCount := srv.snapshotGetCount
+	srv.mu.Unlock()
+
+	if attempted != 2 {
+		t.Errorf("expected both snapshots to be attempted, got %d DELETE calls", attempted)
+	}
+	if getCount < 2 {
+		t.Errorf("expected at least 2 GET calls (list + verification), got %d", getCount)
+	}
+}
+
+// Scenario: Erreur HTTP 500 → exception propagée
+func TestDeleteSnapshots_HTTP500_PropagatesError(t *testing.T) {
+	srv := newSnapshotTestServer(t)
+	srv.snapshotLists = [][]cinderVolumeRecord{
+		{{ID: "snap-server-error", Metadata: map[string]string{"cinder.csi.openstack.org/cluster": "mycluster"}}},
+	}
+	srv.deleteStatus["snap-server-error"] = http.StatusInternalServerError
+
+	session := srv.authenticate(t)
+	err := session.DeleteSnapshots(context.Background(), logr.Discard(), "mycluster")
+
+	if err == nil {
+		t.Fatal("expected error for HTTP 500, got nil")
+	}
+}
+
+// Scenario: Snapshot toujours présent après suppression → erreur retournée
+func TestDeleteSnapshots_StillPresentAfterDeletion_ReturnsError(t *testing.T) {
+	srv := newSnapshotTestServer(t)
+	snap := cinderVolumeRecord{
+		ID:       "snap-persistent",
+		Metadata: map[string]string{"cinder.csi.openstack.org/cluster": "mycluster"},
+	}
+	srv.snapshotLists = [][]cinderVolumeRecord{{snap}, {snap}}
+
+	session := srv.authenticate(t)
+	err := session.DeleteSnapshots(context.Background(), logr.Discard(), "mycluster")
+
+	if err == nil {
+		t.Fatal("expected error when snapshot persists after deletion")
+	}
+	if !strings.Contains(err.Error(), "mycluster") {
+		t.Errorf("expected error to mention cluster name, got: %v", err)
+	}
+}
+
+// Scenario: Aucun snapshot correspondant → pas de suppression, pas de vérification
+func TestDeleteSnapshots_NothingToDelete_NoVerification(t *testing.T) {
+	srv := newSnapshotTestServer(t)
+	srv.snapshotLists = [][]cinderVolumeRecord{{}}
+
+	session := srv.authenticate(t)
+	if err := session.DeleteSnapshots(context.Background(), logr.Discard(), "mycluster"); err != nil {
+		t.Fatalf("unexpected error with no snapshots: %v", err)
+	}
+
+	srv.mu.Lock()
+	deletedCount := len(srv.deletedSnapshots)
+	getCount := srv.snapshotGetCount
+	srv.mu.Unlock()
+
+	if deletedCount != 0 {
+		t.Errorf("expected no DELETE calls, got %d: %v", deletedCount, srv.deletedSnapshots)
+	}
+	if getCount != 1 {
+		t.Errorf("expected exactly 1 GET call (no verification), got %d", getCount)
+	}
+}
