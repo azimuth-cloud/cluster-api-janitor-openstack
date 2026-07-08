@@ -51,4 +51,30 @@ let
       --file $out
   '';
 
-in { inherit manager image image-arm64 sbom; }
+  # CI check: go fmt + go vet + unit tests (native only — arm64 cross tests cannot
+  # run on an amd64 host, so doCheck is NOT set in buildManager itself).
+  tests = (buildManager pkgs).overrideAttrs (_: {
+    pname = "cluster-api-janitor-openstack-tests";
+    subPackages = [];  # build all packages, not just cmd/
+    doCheck = true;
+    checkPhase = ''
+      runHook preCheck
+
+      bad=$(gofmt -l $(find . -name '*.go' \
+            -not -path './vendor/*' -not -path './.git/*'))
+      if [ -n "$bad" ]; then
+        echo "Files not formatted with go fmt:"
+        printf '%s\n' $bad
+        exit 1
+      fi
+
+      go vet ./...
+
+      go test -v $(go list ./... | grep -v '/test/e2e')
+
+      runHook postCheck
+    '';
+    installPhase = "touch $out";
+  });
+
+in { inherit manager image image-arm64 sbom tests; }
