@@ -29,10 +29,12 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	infrav1 "sigs.k8s.io/cluster-api-provider-openstack/api/v1beta1"
 
 	"github.com/azimuth-cloud/cluster-api-janitor-openstack/internal/openstack"
@@ -57,6 +59,8 @@ type OpenStackClusterReconciler struct {
 	Scheme               *runtime.Scheme
 	DefaultVolumesPolicy string
 	RetryDefaultDelay    int
+	Metrics              *Metrics
+	Recorder             record.EventRecorder
 	// PurgeFunc is called to clean up OpenStack resources; defaults to openstack.PurgeResources.
 	PurgeFunc func(context.Context, openstack.PurgeOptions) error
 	// SleepFunc is called instead of time.Sleep; defaults to time.Sleep.
@@ -75,6 +79,18 @@ func (r *OpenStackClusterReconciler) sleep(d time.Duration) {
 		r.SleepFunc(d)
 	} else {
 		time.Sleep(d)
+	}
+}
+
+func (r *OpenStackClusterReconciler) incMetric(result string) {
+	if r.Metrics != nil {
+		r.Metrics.CleanupsTotal.WithLabelValues(result).Inc()
+	}
+}
+
+func (r *OpenStackClusterReconciler) recordEvent(obj client.Object, eventType, reason, msg string) {
+	if r.Recorder != nil {
+		r.Recorder.Event(obj, eventType, reason, msg)
 	}
 }
 
@@ -147,6 +163,8 @@ func (r *OpenStackClusterReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		Logger:         logger,
 	})
 	if purgeErr != nil {
+		r.incMetric("failure")
+		r.recordEvent(&cluster, corev1.EventTypeWarning, "CleanupFailed", purgeErr.Error())
 		logger.Error(purgeErr, "purge failed, will retry")
 		r.sleep(r.retryDelay())
 		if err := r.annotateRetry(ctx, &cluster); err != nil && !apierrors.IsNotFound(err) {
@@ -154,6 +172,9 @@ func (r *OpenStackClusterReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 		return ctrl.Result{}, nil
 	}
+
+	r.incMetric("success")
+	r.recordEvent(&cluster, corev1.EventTypeNormal, "CleanupSucceeded", "OpenStack resources cleaned up successfully")
 
 	// Delete appcred secret if this is the last finalizer and policy says so.
 	if credentialPolicy == PolicyDelete {
@@ -185,6 +206,12 @@ func (r *OpenStackClusterReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 // SetupWithManager registers the reconciler with the controller manager.
 func (r *OpenStackClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if r.Recorder == nil {
+		r.Recorder = mgr.GetEventRecorderFor("capi-janitor")
+	}
+	if r.Metrics == nil {
+		r.Metrics = NewMetrics(ctrlmetrics.Registry)
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&infrav1.OpenStackCluster{}).
 		Complete(r)
