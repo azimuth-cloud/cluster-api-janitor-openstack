@@ -57,6 +57,25 @@ type OpenStackClusterReconciler struct {
 	Scheme               *runtime.Scheme
 	DefaultVolumesPolicy string
 	RetryDefaultDelay    int
+	// PurgeFunc is called to clean up OpenStack resources; defaults to openstack.PurgeResources.
+	PurgeFunc func(context.Context, openstack.PurgeOptions) error
+	// SleepFunc is called instead of time.Sleep; defaults to time.Sleep.
+	SleepFunc func(time.Duration)
+}
+
+func (r *OpenStackClusterReconciler) purge(ctx context.Context, opts openstack.PurgeOptions) error {
+	if r.PurgeFunc != nil {
+		return r.PurgeFunc(ctx, opts)
+	}
+	return openstack.PurgeResources(ctx, opts)
+}
+
+func (r *OpenStackClusterReconciler) sleep(d time.Duration) {
+	if r.SleepFunc != nil {
+		r.SleepFunc(d)
+	} else {
+		time.Sleep(d)
+	}
 }
 
 //+kubebuilder:rbac:groups=infrastructure.cluster.x-k8s.io,resources=openstackclusters,verbs=get;list;watch;patch;update
@@ -118,7 +137,7 @@ func (r *OpenStackClusterReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	credentialPolicy := secret.Annotations[CredentialPolicyAnnotation]
 	includeAppcred := credentialPolicy == PolicyDelete && len(cluster.Finalizers) == 1
 
-	purgeErr := openstack.PurgeResources(ctx, openstack.PurgeOptions{
+	purgeErr := r.purge(ctx, openstack.PurgeOptions{
 		CloudsYAML:     cloudsYAML,
 		CloudName:      cloudName,
 		CACert:         cacert,
@@ -129,8 +148,7 @@ func (r *OpenStackClusterReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	})
 	if purgeErr != nil {
 		logger.Error(purgeErr, "purge failed, will retry")
-		delay := r.retryDelay()
-		time.Sleep(delay)
+		r.sleep(r.retryDelay())
 		if err := r.annotateRetry(ctx, &cluster); err != nil && !apierrors.IsNotFound(err) {
 			return ctrl.Result{}, err
 		}
@@ -148,7 +166,7 @@ func (r *OpenStackClusterReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			// Other finalizers still present; trigger a retry when they are removed.
 			other := otherFinalizer(cluster.Finalizers, Finalizer)
 			logger.Info("waiting for other finalizer before deleting appcred", "otherFinalizer", other)
-			time.Sleep(5 * time.Second)
+			r.sleep(5 * time.Second)
 			if err := r.annotateRetry(ctx, &cluster); err != nil && !apierrors.IsNotFound(err) {
 				return ctrl.Result{}, err
 			}
