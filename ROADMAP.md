@@ -1,649 +1,703 @@
-# Réécriture du projet en Go
+# Go Rewrite
 
-## Contexte
+## Context
 
-Le projet actuel est écrit en Python (asyncio + kopf + easykube + httpx). C'est un opérateur Kubernetes qui nettoie les ressources OpenStack laissées par l'OCCM et le CSI Cinder lors de la suppression de clusters Cluster API.
+The current project is written in Python (asyncio + kopf + easykube + httpx). It is a Kubernetes operator that cleans up OpenStack resources left behind by OCCM and the Cinder CSI when Cluster API clusters are deleted.
 
-La réécriture suit la méthode TDD : les tests Gherkin sont écrits en premier, puis les implémentations.
+The rewrite follows TDD: Gherkin tests are written first, then the implementations.
 
-Outil de scaffolding : **kubebuilder** (skill disponible).
+Scaffolding tool: **kubebuilder**.
 
 ---
 
-## Audit du code Python existant
+## Audit of the Existing Python Code
 
-### Modules principaux
+### Main Modules
 
-| Fichier | Rôle |
+| File | Role |
 |---|---|
-| `capi_janitor/openstack/openstack.py` | Client OpenStack : authentification, catalogue de services, ressources REST paginées |
-| `capi_janitor/openstack/operator.py` | Logique opérateur : handlers kopf, filtres de ressources, purge OpenStack |
+| `capi_janitor/openstack/openstack.py` | OpenStack client: authentication, service catalog, paginated REST resources |
+| `capi_janitor/openstack/operator.py` | Operator logic: kopf handlers, resource filters, OpenStack purge |
 
-### Fonctionnalités couvertes
+### Covered Features
 
-**Authentification OpenStack**
-- Uniquement `v3applicationcredential`
-- Gestion du token X-Auth-Token (refresh avec mutex asyncio)
-- Support certificat CA personnalisé (cacert depuis le secret K8s)
-- Catalogue de services filtré par interface (public/internal/admin) et région
+**OpenStack Authentication**
+- Only `v3applicationcredential`
+- X-Auth-Token management (refresh with asyncio mutex)
+- Custom CA certificate support (cacert from K8s secret)
+- Service catalog filtered by interface (public/internal/admin) and region
 
-**Filtrage des ressources à nettoyer**
-- Floating IPs : description `"Floating IP for Kubernetes external service … from cluster <name>"`
-- Load Balancers Octavia : nom `kube_service_<cluster>_*`
-- Security Groups : description `"Security Group for Service LoadBalancer in cluster <name>"`
-- Volumes Cinder : métadonnée `cinder.csi.openstack.org/cluster == <name>`, sauf propriété `janitor.capi.azimuth-cloud.com/keep == true`
-- Snapshots Cinder : même métadonnée cluster
+**Resource Filtering**
+- Floating IPs: description `"Floating IP for Kubernetes external service … from cluster <name>"`
+- Octavia Load Balancers: name `kube_service_<cluster>_*`
+- Security Groups: description `"Security Group for Service LoadBalancer in cluster <name>"`
+- Cinder Volumes: metadata `cinder.csi.openstack.org/cluster == <name>`, unless property `janitor.capi.azimuth-cloud.com/keep == true`
+- Cinder Snapshots: same cluster metadata
 
-**Politique de suppression**
-- Volumes : configurable via env var `CAPI_JANITOR_DEFAULT_VOLUMES_POLICY` (défaut `delete`) et annotation `janitor.capi.stackhpc.com/volumes-policy` par cluster
-- Application Credential : supprimé si annotation `janitor.capi.stackhpc.com/credential-policy: delete` sur le secret ET si c'est le dernier finalizer
+**Deletion Policy**
+- Volumes: configurable via env var `CAPI_JANITOR_DEFAULT_VOLUMES_POLICY` (default `delete`) and annotation `janitor.capi.stackhpc.com/volumes-policy` per cluster
+- Application Credential: deleted if annotation `janitor.capi.stackhpc.com/credential-policy: delete` on the secret AND it is the last finalizer
 
-**Lifecycle Kubernetes**
-- Finalizer `janitor.capi.stackhpc.com` sur `OpenStackCluster`
-- Nom du cluster : label `cluster.x-k8s.io/cluster-name` en priorité, sinon `metadata.name`
-- Retry via annotation aléatoire `janitor.capi.stackhpc.com/retry` (déclenche un nouvel événement)
-- Backoff configurable `CAPI_JANITOR_RETRY_DEFAULT_DELAY` (défaut 60s)
+**Kubernetes Lifecycle**
+- Finalizer `janitor.capi.stackhpc.com` on `OpenStackCluster`
+- Cluster name: label `cluster.x-k8s.io/cluster-name` takes priority, otherwise `metadata.name`
+- Retry via random annotation `janitor.capi.stackhpc.com/retry` (triggers a new event)
+- Configurable backoff `CAPI_JANITOR_RETRY_DEFAULT_DELAY` (default 60s)
 
-**Gestion des erreurs**
-- HTTP 400/409 lors de la suppression : retry silencieux
-- HTTP 404 lors de la récupération du catalogue : authentification considérée comme échouée (sans erreur fatale)
-- HTTP 422 lors du patch des finalizers : `TemporaryError` kopf
-- Erreur catalogue `volumev3` → fallback sur `block-storage`
+**Error Handling**
+- HTTP 400/409 during deletion: silent retry
+- HTTP 404 during catalog fetch: authentication considered failed (no fatal error)
+- HTTP 422 during finalizer patch: kopf `TemporaryError`
+- Catalog error `volumev3` → fallback to `block-storage`
 
-### Tests existants
+### Existing Tests
 
-| Fichier | Ce qui est testé |
+| File | What is tested |
 |---|---|
-| `test_openstack.py` | Authentification réussie, 404, absence d'interface, absence de région, multiples services |
-| `test_operator.py` | Filtrage FIPs, LBs, SGs, volumes, snapshots ; `empty()` ; `try_delete()` ; handler d'événement (ajout finalizer, skip, purge) ; erreur d'auth dans purge |
+| `test_openstack.py` | Successful auth, 404, missing interface, missing region, multiple services |
+| `test_operator.py` | FIP/LB/SG/volume/snapshot filtering; `empty()`; `try_delete()`; event handler (add finalizer, skip, purge); auth error in purge |
 
-**Lacune notable** : `test_purge_openstack_resources_success` est commenté (complexité du mock).
+**Notable gap**: `test_purge_openstack_resources_success` is commented out (mock complexity).
 
-### Chart Helm
+### Helm Chart
 
-- `ClusterRole` : namespaces (list/watch), events (create), secrets (get/delete), openstackclusters (list/get/watch/patch), CRDs (list/get/watch)
-- Valeur `defaultVolumesPolicy: delete`
-- Image : `ghcr.io/azimuth-cloud/cluster-api-janitor-openstack`
+- `ClusterRole`: namespaces (list/watch), events (create), secrets (get/delete), openstackclusters (list/get/watch/patch), CRDs (list/get/watch)
+- Value `defaultVolumesPolicy: delete`
+- Image: `ghcr.io/azimuth-cloud/cluster-api-janitor-openstack`
 
-### PRs en attente à intégrer
+### Pending PRs to Integrate
 
-| PR | Titre | Impact |
+| PR | Title | Impact |
 |---|---|---|
-| #261 | Fix leaving Azimuth cluster loadbalancers behind | Ajoute la détection des LBs Azimuth (`kube_service_<cluster>_` + LBs nommés différemment par Azimuth) |
+| #261 | Fix leaving Azimuth cluster loadbalancers behind | Adds detection of Azimuth LBs (`kube_service_<cluster>_` + LBs named differently by Azimuth) |
 
 ---
 
-## Feuille de route agile
+## Agile Roadmap
 
 ---
 
-### Epic 1 — Authentification OpenStack
+### Epic 1 — OpenStack Authentication
 
-#### US1.1 — Authentification via Application Credential v3
+#### US1.1 — Authentication via Application Credential v3
 
 ```gherkin
-Feature: Authentification OpenStack via Application Credential
-  In order to accéder aux APIs OpenStack
-  As an opérateur
-  I want to m'authentifier avec un Application Credential v3
+Feature: OpenStack Authentication via Application Credential
+  In order to access OpenStack APIs
+  As an operator
+  I want to authenticate using a v3 Application Credential
 
-  Scenario: Authentification réussie
-    Given un clouds.yaml avec auth_type "v3applicationcredential"
-    And un application_credential_id et application_credential_secret valides
-    When l'opérateur initialise la connexion OpenStack
-    Then un token X-Auth-Token est obtenu depuis Keystone
-    And le catalogue de services est chargé
+  Scenario: Successful authentication
+    Given a clouds.yaml with auth_type "v3applicationcredential"
+    And a valid application_credential_id and application_credential_secret
+    When the operator initialises the OpenStack connection
+    Then an X-Auth-Token is obtained from Keystone
+    And the service catalog is loaded
 
-  Scenario: Refresh du token lors d'une expiration
-    Given un token X-Auth-Token expiré
-    When l'opérateur effectue un appel API
-    Then un nouveau token est demandé à Keystone
-    And l'appel original est rejoué avec le nouveau token
+  Scenario: Token refresh on expiry
+    Given an expired X-Auth-Token
+    When the operator makes an API call
+    Then a new token is requested from Keystone
+    And the original call is replayed with the new token
 
-  Scenario: Authentification avec un type non supporté
-    Given un clouds.yaml avec auth_type "password"
-    When l'opérateur tente de créer un client Cloud
-    Then une erreur UnsupportedAuthenticationError est levée
+  Scenario: Authentication with unsupported type
+    Given a clouds.yaml with auth_type "password"
+    When the operator attempts to create a Cloud client
+    Then an UnsupportedAuthenticationError is raised
 ```
 
-#### US1.2 — Filtrage du catalogue de services par interface et région
+#### US1.2 — Service Catalog Filtering by Interface and Region
 
 ```gherkin
-Feature: Catalogue de services OpenStack
-  Scenario: Endpoint sélectionné selon l'interface configurée
-    Given un catalogue avec des endpoints "public" et "internal"
-    And l'interface configurée est "public"
-    When le catalogue est chargé
-    Then seuls les endpoints "public" sont retenus
+Feature: OpenStack Service Catalog
+  Scenario: Endpoint selected by configured interface
+    Given a catalog with "public" and "internal" endpoints
+    And the configured interface is "public"
+    When the catalog is loaded
+    Then only "public" endpoints are retained
 
-  Scenario: Endpoint sélectionné selon la région configurée
-    Given un catalogue avec des endpoints pour "RegionOne" et "RegionTwo"
-    And la région configurée est "RegionOne"
-    When le catalogue est chargé
-    Then seuls les endpoints de "RegionOne" sont retenus
+  Scenario: Endpoint selected by configured region
+    Given a catalog with endpoints for "RegionOne" and "RegionTwo"
+    And the configured region is "RegionOne"
+    When the catalog is loaded
+    Then only "RegionOne" endpoints are retained
 
-  Scenario: Aucune région configurée
-    Given un catalogue avec des endpoints dans plusieurs régions
-    And aucune région n'est configurée
-    When le catalogue est chargé
-    Then le premier endpoint correspondant à l'interface est retenu pour chaque service
+  Scenario: No region configured
+    Given a catalog with endpoints in multiple regions
+    And no region is configured
+    When the catalog is loaded
+    Then the first endpoint matching the interface is retained for each service
 ```
 
-#### US1.3 — Gestion d'un credential révoqué ou invalide
+#### US1.3 — Revoked or Invalid Credential Handling
 
 ```gherkin
-Feature: Credential OpenStack invalide
-  Scenario: Application credential supprimé avant la purge
-    Given un cluster OpenStack en cours de suppression
-    And l'application credential a déjà été supprimé
-    When l'opérateur tente de s'authentifier
-    Then is_authenticated retourne false
-    And si include_appcred est true, un warning est émis et la purge s'arrête proprement
-    And si include_appcred est false, une AuthenticationError est levée
+Feature: Invalid OpenStack Credential
+  Scenario: Application credential deleted before purge
+    Given an OpenStack cluster being deleted
+    And the application credential has already been deleted
+    When the operator attempts to authenticate
+    Then is_authenticated returns false
+    And if include_appcred is true, a warning is emitted and the purge stops cleanly
+    And if include_appcred is false, an AuthenticationError is raised
 
-  Scenario: Catalogue retourne 404
-    Given une URL Keystone valide mais le catalogue retourne 404
-    When l'opérateur charge le catalogue
-    Then is_authenticated retourne false
-    And aucune erreur fatale n'est levée
+  Scenario: Catalog returns 404
+    Given a valid Keystone URL but the catalog returns 404
+    When the operator loads the catalog
+    Then is_authenticated returns false
+    And no fatal error is raised
 ```
 
-#### US1.4 — Support des certificats CA personnalisés
+#### US1.4 — Custom CA Certificate Support
 
 ```gherkin
-Feature: Certificat CA personnalisé
-  Scenario: CA fourni dans le secret Kubernetes
-    Given un secret Kubernetes contenant une entrée "cacert"
-    When l'opérateur initialise le transport TLS
-    Then le CA est chargé dans le contexte SSL
-    And les appels HTTPS vers OpenStack utilisent ce CA pour la vérification
+Feature: Custom CA Certificate
+  Scenario: CA provided in the Kubernetes secret
+    Given a Kubernetes secret containing a "cacert" entry
+    When the operator initialises the TLS transport
+    Then the CA is loaded into the SSL context
+    And HTTPS calls to OpenStack use this CA for verification
 
-  Scenario: Pas de CA fourni
-    Given un secret Kubernetes sans entrée "cacert"
-    When l'opérateur initialise le transport TLS
-    Then le CA système est utilisé pour la vérification TLS
-```
-
----
-
-### Epic 2 — Nettoyage des Floating IPs
-
-#### US2.1 — Identifier les Floating IPs d'un cluster
-
-```gherkin
-Feature: Identification des Floating IPs d'un cluster
-  Scenario: FIP appartenant au cluster
-    Given une liste de Floating IPs OpenStack
-    And une FIP avec la description "Floating IP for Kubernetes external service from cluster mycluster"
-    When les FIPs du cluster "mycluster" sont listées
-    Then cette FIP est incluse dans le résultat
-
-  Scenario: FIP d'un autre cluster
-    Given une FIP avec la description "Floating IP for Kubernetes external service from cluster othercluster"
-    When les FIPs du cluster "mycluster" sont listées
-    Then cette FIP est exclue du résultat
-
-  Scenario: FIP sans description Kubernetes
-    Given une FIP avec la description "Some other description"
-    When les FIPs du cluster "mycluster" sont listées
-    Then cette FIP est exclue du résultat
-```
-
-#### US2.2 — Supprimer les Floating IPs
-
-```gherkin
-Feature: Suppression des Floating IPs
-  Scenario: Suppression réussie
-    Given une FIP appartenant au cluster "mycluster"
-    When la purge des FIPs est déclenchée
-    Then la FIP est supprimée via l'API Neutron
-    And un log INFO est émis
-
-  Scenario: Erreur HTTP 400 lors de la suppression
-    Given une suppression de FIP retourne HTTP 400
-    When la purge tente de supprimer la FIP
-    Then un warning est émis
-    And la suppression continue pour les autres FIPs
-    And check_fips est true pour déclencher une vérification
-
-  Scenario: Erreur HTTP 500 lors de la suppression
-    Given une suppression de FIP retourne HTTP 500
-    When la purge tente de supprimer la FIP
-    Then une exception est propagée
+  Scenario: No CA provided
+    Given a Kubernetes secret without a "cacert" entry
+    When the operator initialises the TLS transport
+    Then the system CA is used for TLS verification
 ```
 
 ---
 
-### Epic 3 — Nettoyage des Load Balancers Octavia
+### Epic 2 — Floating IP Cleanup
 
-#### US3.1 — Identifier les Load Balancers Kubernetes d'un cluster
+#### US2.1 — Identify Floating IPs of a Cluster
 
 ```gherkin
-Feature: Identification des Load Balancers Kubernetes
-  Scenario: LB appartenant au cluster
-    Given un LB avec le nom "kube_service_mycluster_api"
-    When les LBs du cluster "mycluster" sont listés
-    Then ce LB est inclus dans le résultat
+Feature: Identifying Floating IPs of a Cluster
+  Scenario: FIP belonging to the cluster
+    Given a list of OpenStack Floating IPs
+    And a FIP with description "Floating IP for Kubernetes external service from cluster mycluster"
+    When the FIPs of cluster "mycluster" are listed
+    Then this FIP is included in the result
 
-  Scenario: LB d'un autre cluster
-    Given un LB avec le nom "kube_service_othercluster_api"
-    When les LBs du cluster "mycluster" sont listés
-    Then ce LB est exclu du résultat
+  Scenario: FIP from another cluster
+    Given a FIP with description "Floating IP for Kubernetes external service from cluster othercluster"
+    When the FIPs of cluster "mycluster" are listed
+    Then this FIP is excluded from the result
 
-  Scenario: LB sans préfixe kube_service
-    Given un LB avec le nom "fake_service_mycluster_api"
-    When les LBs du cluster "mycluster" sont listés
-    Then ce LB est exclu du résultat
+  Scenario: FIP without a Kubernetes description
+    Given a FIP with description "Some other description"
+    When the FIPs of cluster "mycluster" are listed
+    Then this FIP is excluded from the result
 ```
 
-#### US3.2 — Identifier les Load Balancers Azimuth (PR #261)
+#### US2.2 — Delete Floating IPs
 
 ```gherkin
-Feature: Identification des Load Balancers Azimuth
-  Scenario: LB Azimuth appartenant au cluster
-    Given un LB Azimuth identifiable comme appartenant au cluster "mycluster"
-    When les LBs du cluster "mycluster" sont listés
-    Then ce LB Azimuth est inclus dans le résultat
+Feature: Floating IP Deletion
+  Scenario: Successful deletion
+    Given a FIP belonging to cluster "mycluster"
+    When the FIP purge is triggered
+    Then the FIP is deleted via the Neutron API
+    And an INFO log is emitted
 
-  Scenario: Erreur HTTP lors du listing des LBs
-    Given l'API Octavia retourne une erreur HTTP lors du listing
-    When les LBs du cluster "mycluster" sont listés
-    Then un log ERROR est émis avec le code HTTP
-    And aucune exception n'est propagée
-    And un warning indique que des LBs pourraient rester
-```
+  Scenario: HTTP 400 error during deletion
+    Given a FIP deletion returns HTTP 400
+    When the purge attempts to delete the FIP
+    Then a warning is emitted
+    And deletion continues for other FIPs
+    And check_fips is true to trigger a verification
 
-#### US3.3 — Supprimer les Load Balancers en cascade
-
-```gherkin
-Feature: Suppression des Load Balancers en cascade
-  Scenario: Suppression réussie avec cascade
-    Given un LB appartenant au cluster "mycluster"
-    When la purge des LBs est déclenchée
-    Then le LB est supprimé avec le paramètre cascade=true
-    And les ressources Octavia associées (listeners, pools, membres) sont supprimées
+  Scenario: HTTP 500 error during deletion
+    Given a FIP deletion returns HTTP 500
+    When the purge attempts to delete the FIP
+    Then an exception is propagated
 ```
 
 ---
 
-### Epic 4 — Nettoyage des Security Groups
+### Epic 3 — Octavia Load Balancer Cleanup
 
-#### US4.1 — Identifier les Security Groups d'un cluster
+#### US3.1 — Identify Kubernetes Load Balancers of a Cluster
 
 ```gherkin
-Feature: Identification des Security Groups d'un cluster
-  Scenario: SG appartenant au cluster
-    Given un SG avec la description "Security Group for Service LoadBalancer in cluster mycluster"
-    When les SGs du cluster "mycluster" sont listés
-    Then ce SG est inclus dans le résultat
+Feature: Identifying Kubernetes Load Balancers
+  Scenario: LB belonging to the cluster
+    Given an LB with name "kube_service_mycluster_api"
+    When the LBs of cluster "mycluster" are listed
+    Then this LB is included in the result
 
-  Scenario: SG d'un autre cluster
-    Given un SG avec la description "Security Group for Service LoadBalancer in cluster othercluster"
-    When les SGs du cluster "mycluster" sont listés
-    Then ce SG est exclu du résultat
+  Scenario: LB from another cluster
+    Given an LB with name "kube_service_othercluster_api"
+    When the LBs of cluster "mycluster" are listed
+    Then this LB is excluded from the result
+
+  Scenario: LB without kube_service prefix
+    Given an LB with name "fake_service_mycluster_api"
+    When the LBs of cluster "mycluster" are listed
+    Then this LB is excluded from the result
 ```
 
-#### US4.2 — Supprimer les Security Groups
+#### US3.2 — Identify Azimuth Load Balancers (PR #261)
 
 ```gherkin
-Feature: Suppression des Security Groups
-  Scenario: Suppression réussie
-    Given un SG appartenant au cluster "mycluster"
-    When la purge des SGs est déclenchée
-    Then le SG est supprimé via l'API Neutron
+Feature: Identifying Azimuth Load Balancers
+  Scenario: Azimuth LB belonging to the cluster
+    Given an Azimuth LB identifiable as belonging to cluster "mycluster"
+    When the LBs of cluster "mycluster" are listed
+    Then this Azimuth LB is included in the result
 
-  Scenario: SG encore utilisé (HTTP 409)
-    Given une suppression de SG retourne HTTP 409
-    When la purge tente de supprimer le SG
-    Then un warning est émis
-    And check_secgroups est true pour une vérification ultérieure
+  Scenario: HTTP error during LB listing
+    Given the Octavia API returns an HTTP error during listing
+    When the LBs of cluster "mycluster" are listed
+    Then an ERROR log is emitted with the HTTP code
+    And no exception is propagated
+    And a warning indicates that LBs may remain
+```
+
+#### US3.3 — Delete Load Balancers with Cascade
+
+```gherkin
+Feature: Cascaded Load Balancer Deletion
+  Scenario: Successful deletion with cascade
+    Given an LB belonging to cluster "mycluster"
+    When the LB purge is triggered
+    Then the LB is deleted with the cascade=true parameter
+    And associated Octavia resources (listeners, pools, members) are deleted
 ```
 
 ---
 
-### Epic 5 — Gestion des Volumes Cinder
+### Epic 4 — Security Group Cleanup
 
-#### US5.1 — Identifier les volumes d'un cluster
+#### US4.1 — Identify Security Groups of a Cluster
 
 ```gherkin
-Feature: Identification des volumes Cinder d'un cluster
-  Scenario: Volume appartenant au cluster sans marquage keep
-    Given un volume avec la métadonnée "cinder.csi.openstack.org/cluster" = "mycluster"
-    And la propriété "janitor.capi.azimuth-cloud.com/keep" est absente ou != "true"
-    When les volumes du cluster "mycluster" sont listés
-    Then ce volume est inclus dans le résultat
+Feature: Identifying Security Groups of a Cluster
+  Scenario: SG belonging to the cluster
+    Given an SG with description "Security Group for Service LoadBalancer in cluster mycluster"
+    When the SGs of cluster "mycluster" are listed
+    Then this SG is included in the result
 
-  Scenario: Volume marqué keep par l'utilisateur
-    Given un volume avec la métadonnée "cinder.csi.openstack.org/cluster" = "mycluster"
-    And la propriété "janitor.capi.azimuth-cloud.com/keep" = "true"
-    When les volumes du cluster "mycluster" sont listés
-    Then ce volume est exclu du résultat
-
-  Scenario: Volume d'un autre cluster
-    Given un volume avec la métadonnée "cinder.csi.openstack.org/cluster" = "othercluster"
-    When les volumes du cluster "mycluster" sont listés
-    Then ce volume est exclu du résultat
-
-  Scenario: Volume sans métadonnée CSI
-    Given un volume sans métadonnée "cinder.csi.openstack.org/cluster"
-    When les volumes du cluster "mycluster" sont listés
-    Then ce volume est exclu du résultat
+  Scenario: SG from another cluster
+    Given an SG with description "Security Group for Service LoadBalancer in cluster othercluster"
+    When the SGs of cluster "mycluster" are listed
+    Then this SG is excluded from the result
 ```
 
-#### US5.2 — Politique de suppression des volumes
+#### US4.2 — Delete Security Groups
 
 ```gherkin
-Feature: Politique de suppression des volumes
-  Scenario: Politique globale "delete" (défaut)
-    Given la variable d'environnement CAPI_JANITOR_DEFAULT_VOLUMES_POLICY non définie
-    When un cluster est supprimé sans annotation de volumes
-    Then les volumes du cluster sont supprimés
+Feature: Security Group Deletion
+  Scenario: Successful deletion
+    Given an SG belonging to cluster "mycluster"
+    When the SG purge is triggered
+    Then the SG is deleted via the Neutron API
 
-  Scenario: Politique globale "keep"
+  Scenario: SG still in use (HTTP 409)
+    Given an SG deletion returns HTTP 409
+    When the purge attempts to delete the SG
+    Then a warning is emitted
+    And check_secgroups is true for a later verification
+```
+
+---
+
+### Epic 5 — Cinder Volume Management
+
+#### US5.1 — Identify Volumes of a Cluster
+
+```gherkin
+Feature: Identifying Cinder Volumes of a Cluster
+  Scenario: Volume belonging to the cluster without keep flag
+    Given a volume with metadata "cinder.csi.openstack.org/cluster" = "mycluster"
+    And the property "janitor.capi.azimuth-cloud.com/keep" is absent or != "true"
+    When the volumes of cluster "mycluster" are listed
+    Then this volume is included in the result
+
+  Scenario: Volume flagged keep by the user
+    Given a volume with metadata "cinder.csi.openstack.org/cluster" = "mycluster"
+    And the property "janitor.capi.azimuth-cloud.com/keep" = "true"
+    When the volumes of cluster "mycluster" are listed
+    Then this volume is excluded from the result
+
+  Scenario: Volume from another cluster
+    Given a volume with metadata "cinder.csi.openstack.org/cluster" = "othercluster"
+    When the volumes of cluster "mycluster" are listed
+    Then this volume is excluded from the result
+
+  Scenario: Volume without CSI metadata
+    Given a volume without metadata "cinder.csi.openstack.org/cluster"
+    When the volumes of cluster "mycluster" are listed
+    Then this volume is excluded from the result
+```
+
+#### US5.2 — Volume Deletion Policy
+
+```gherkin
+Feature: Volume Deletion Policy
+  Scenario: Global policy "delete" (default)
+    Given the environment variable CAPI_JANITOR_DEFAULT_VOLUMES_POLICY is not set
+    When a cluster is deleted without a volumes annotation
+    Then the cluster's volumes are deleted
+
+  Scenario: Global policy "keep"
     Given CAPI_JANITOR_DEFAULT_VOLUMES_POLICY = "keep"
-    When un cluster est supprimé sans annotation de volumes
-    Then les volumes du cluster sont conservés
+    When a cluster is deleted without a volumes annotation
+    Then the cluster's volumes are kept
 
-  Scenario: Annotation "delete" sur le cluster (override keep global)
+  Scenario: Annotation "delete" on the cluster (overrides global keep)
     Given CAPI_JANITOR_DEFAULT_VOLUMES_POLICY = "keep"
-    And l'annotation "janitor.capi.stackhpc.com/volumes-policy" = "delete" sur l'OpenStackCluster
-    When le cluster est supprimé
-    Then les volumes du cluster sont supprimés
+    And the annotation "janitor.capi.stackhpc.com/volumes-policy" = "delete" on the OpenStackCluster
+    When the cluster is deleted
+    Then the cluster's volumes are deleted
 
-  Scenario: Annotation "keep" sur le cluster (override delete global)
+  Scenario: Annotation "keep" on the cluster (overrides global delete)
     Given CAPI_JANITOR_DEFAULT_VOLUMES_POLICY = "delete"
-    And l'annotation "janitor.capi.stackhpc.com/volumes-policy" = "keep" sur l'OpenStackCluster
-    When le cluster est supprimé
-    Then les volumes du cluster sont conservés
+    And the annotation "janitor.capi.stackhpc.com/volumes-policy" = "keep" on the OpenStackCluster
+    When the cluster is deleted
+    Then the cluster's volumes are kept
 ```
 
 ---
 
-### Epic 6 — Gestion des Snapshots Cinder
+### Epic 6 — Cinder Snapshot Management
 
-#### US6.1 — Identifier et supprimer les snapshots d'un cluster
+#### US6.1 — Identify and Delete Snapshots of a Cluster
 
 ```gherkin
-Feature: Snapshots Cinder d'un cluster
-  Scenario: Snapshot appartenant au cluster
-    Given un snapshot avec la métadonnée "cinder.csi.openstack.org/cluster" = "mycluster"
-    When les snapshots du cluster "mycluster" sont listés
-    Then ce snapshot est inclus dans le résultat
+Feature: Cinder Snapshots of a Cluster
+  Scenario: Snapshot belonging to the cluster
+    Given a snapshot with metadata "cinder.csi.openstack.org/cluster" = "mycluster"
+    When the snapshots of cluster "mycluster" are listed
+    Then this snapshot is included in the result
 
-  Scenario: Snapshot d'un autre cluster
-    Given un snapshot avec la métadonnée "cinder.csi.openstack.org/cluster" = "othercluster"
-    When les snapshots du cluster "mycluster" sont listés
-    Then ce snapshot est exclu du résultat
+  Scenario: Snapshot from another cluster
+    Given a snapshot with metadata "cinder.csi.openstack.org/cluster" = "othercluster"
+    When the snapshots of cluster "mycluster" are listed
+    Then this snapshot is excluded from the result
 
-  Scenario: Snapshots supprimés avant les volumes
-    Given des snapshots et des volumes appartenant au cluster "mycluster"
-    When la purge est déclenchée avec include_volumes = true
-    Then les snapshots sont supprimés en premier
-    And les volumes sont supprimés ensuite
+  Scenario: Snapshots deleted before volumes
+    Given snapshots and volumes belonging to cluster "mycluster"
+    When the purge is triggered with include_volumes = true
+    Then snapshots are deleted first
+    And volumes are deleted afterwards
 ```
 
 ---
 
-### Epic 7 — Gestion des Application Credentials
+### Epic 7 — Application Credential Management
 
-#### US7.1 — Supprimer l'Application Credential OpenStack
+#### US7.1 — Delete the OpenStack Application Credential
 
 ```gherkin
-Feature: Suppression de l'Application Credential
-  Scenario: Suppression autorisée (dernier finalizer)
-    Given l'annotation "janitor.capi.stackhpc.com/credential-policy" = "delete" sur le secret
-    And le finalizer de l'opérateur est le seul finalizer présent
-    When la purge des ressources OpenStack est terminée
-    Then l'Application Credential est supprimé via l'API Identity
-    And le secret Kubernetes contenant clouds.yaml est supprimé
+Feature: Application Credential Deletion
+  Scenario: Deletion authorised (last finalizer)
+    Given the annotation "janitor.capi.stackhpc.com/credential-policy" = "delete" on the secret
+    And the operator's finalizer is the only finalizer present
+    When the purge of OpenStack resources is complete
+    Then the Application Credential is deleted via the Identity API
+    And the Kubernetes secret containing clouds.yaml is deleted
 
-  Scenario: Autres finalizers encore présents
-    Given l'annotation "credential-policy" = "delete" sur le secret
-    And d'autres finalizers sont encore présents sur l'OpenStackCluster
-    When la purge est terminée
-    Then l'Application Credential n'est pas supprimé
-    And une FinalizerStillPresentError est levée pour déclencher un retry
+  Scenario: Other finalizers still present
+    Given the annotation "credential-policy" = "delete" on the secret
+    And other finalizers are still present on the OpenStackCluster
+    When the purge is complete
+    Then the Application Credential is not deleted
+    And a FinalizerStillPresentError is raised to trigger a retry
 
-  Scenario: Application Credential non supprimable (403)
-    Given l'Application Credential est restreint (pas d'unrestricted)
-    When la suppression de l'appcred est tentée
-    Then un warning est émis
-    And la suppression du secret Kubernetes procède quand même
+  Scenario: Application Credential cannot be deleted (403)
+    Given the Application Credential is restricted (no unrestricted flag)
+    When the appcred deletion is attempted
+    Then a warning is emitted
+    And the Kubernetes secret deletion proceeds anyway
 ```
 
 ---
 
-### Epic 8 — Lifecycle Kubernetes (pattern Finalizer)
+### Epic 8 — Kubernetes Lifecycle (Finalizer Pattern)
 
-#### US8.1 — Ajouter un finalizer à la création
+#### US8.1 — Add a Finalizer on Creation
 
 ```gherkin
-Feature: Ajout du finalizer janitor sur OpenStackCluster
-  Scenario: Cluster sans deletionTimestamp et sans finalizer janitor
-    Given un OpenStackCluster sans deletionTimestamp
-    And sans finalizer "janitor.capi.stackhpc.com"
-    When un événement est reçu pour ce cluster
-    Then le finalizer "janitor.capi.stackhpc.com" est ajouté via patch
-    And un log INFO confirme l'ajout
+Feature: Adding the Janitor Finalizer to OpenStackCluster
+  Scenario: Cluster without deletionTimestamp and without janitor finalizer
+    Given an OpenStackCluster without deletionTimestamp
+    And without finalizer "janitor.capi.stackhpc.com"
+    When an event is received for this cluster
+    Then the finalizer "janitor.capi.stackhpc.com" is added via patch
+    And an INFO log confirms the addition
 
-  Scenario: Cluster avec finalizer déjà présent
-    Given un OpenStackCluster sans deletionTimestamp
-    And avec le finalizer "janitor.capi.stackhpc.com" déjà présent
-    When un événement est reçu
-    Then aucun patch n'est effectué
+  Scenario: Cluster with finalizer already present
+    Given an OpenStackCluster without deletionTimestamp
+    And with the finalizer "janitor.capi.stackhpc.com" already present
+    When an event is received
+    Then no patch is made
 ```
 
-#### US8.2 — Nom du cluster depuis le label ou metadata.name
+#### US8.2 — Cluster Name from Label or metadata.name
 
 ```gherkin
-Feature: Résolution du nom du cluster
-  Scenario: Label cluster.x-k8s.io/cluster-name présent
-    Given un OpenStackCluster avec le label "cluster.x-k8s.io/cluster-name" = "myapp"
+Feature: Cluster Name Resolution
+  Scenario: Label cluster.x-k8s.io/cluster-name present
+    Given an OpenStackCluster with label "cluster.x-k8s.io/cluster-name" = "myapp"
     And metadata.name = "myapp-openstack"
-    When l'opérateur résout le nom du cluster pour le nettoyage
-    Then le nom "myapp" est utilisé
+    When the operator resolves the cluster name for cleanup
+    Then the name "myapp" is used
 
   Scenario: Label absent
-    Given un OpenStackCluster sans label "cluster.x-k8s.io/cluster-name"
+    Given an OpenStackCluster without label "cluster.x-k8s.io/cluster-name"
     And metadata.name = "mycluster"
-    When l'opérateur résout le nom du cluster
-    Then le nom "mycluster" est utilisé
+    When the operator resolves the cluster name
+    Then the name "mycluster" is used
 ```
 
-#### US8.3 — Supprimer le finalizer après nettoyage réussi
+#### US8.3 — Remove the Finalizer after Successful Cleanup
 
 ```gherkin
-Feature: Suppression du finalizer après purge
-  Scenario: Purge réussie
-    Given un OpenStackCluster en cours de suppression
-    And toutes les ressources OpenStack ont été supprimées
-    When la purge est terminée sans erreur
-    Then le finalizer "janitor.capi.stackhpc.com" est retiré via patch
-    And un log INFO confirme la suppression du finalizer
+Feature: Finalizer Removal after Purge
+  Scenario: Successful purge
+    Given an OpenStackCluster being deleted
+    And all OpenStack resources have been deleted
+    When the purge completes without error
+    Then the finalizer "janitor.capi.stackhpc.com" is removed via patch
+    And an INFO log confirms the finalizer removal
 
-  Scenario: Finalizer absent au moment de la suppression
-    Given un OpenStackCluster avec deletionTimestamp
-    And sans finalizer "janitor.capi.stackhpc.com"
-    When un événement est reçu
-    Then aucune purge n'est déclenchée
-    And un log INFO indique que le finalizer est absent
+  Scenario: Finalizer absent at removal time
+    Given an OpenStackCluster with deletionTimestamp
+    And without the finalizer "janitor.capi.stackhpc.com"
+    When an event is received
+    Then no purge is triggered
+    And an INFO log indicates the finalizer is absent
 ```
 
-#### US8.4 — Mécanisme de retry via annotation
+#### US8.4 — Retry Mechanism via Annotation
 
 ```gherkin
-Feature: Retry via annotation aléatoire
-  Scenario: Erreur temporaire lors de la purge
-    Given une purge qui échoue avec une ResourcesStillPresentError
-    When l'opérateur gère l'erreur
-    Then après un délai de backoff (5s pour ResourcesStillPresent)
-    And une annotation aléatoire "janitor.capi.stackhpc.com/retry" est posée sur l'OpenStackCluster
-    And un nouvel événement est déclenché pour rejouer la purge
+Feature: Retry via Random Annotation
+  Scenario: Transient error during purge
+    Given a purge that fails with a ResourcesStillPresentError
+    When the operator handles the error
+    Then after a backoff delay (5s for ResourcesStillPresent)
+    And a random annotation "janitor.capi.stackhpc.com/retry" is set on the OpenStackCluster
+    And a new event is triggered to replay the purge
 
-  Scenario: Erreur inconnue lors de la purge
-    Given une purge qui échoue avec une exception non classifiée
-    When l'opérateur gère l'erreur
-    Then le délai est CAPI_JANITOR_RETRY_DEFAULT_DELAY (défaut 60s)
-    And l'exception est loguée avec stack trace
+  Scenario: Unknown error during purge
+    Given a purge that fails with an unclassified exception
+    When the operator handles the error
+    Then the delay is CAPI_JANITOR_RETRY_DEFAULT_DELAY (default 60s)
+    And the exception is logged with a stack trace
 
-  Scenario: Ressource supprimée entre l'erreur et le retry
-    Given l'OpenStackCluster est supprimé pendant le backoff
-    When l'opérateur tente d'annoter la ressource
-    Then l'ApiError 404 est ignorée
+  Scenario: Resource deleted between the error and the retry
+    Given the OpenStackCluster is deleted during backoff
+    When the operator attempts to annotate the resource
+    Then the 404 ApiError is ignored
 ```
 
 ---
 
-### Epic 9 — Configuration de l'opérateur
+### Epic 9 — Operator Configuration
 
-#### US9.1 — Configuration via variables d'environnement
+#### US9.1 — Configuration via Environment Variables
 
 ```gherkin
-Feature: Configuration via variables d'environnement
-  Scenario: Politique volumes par défaut configurée
+Feature: Configuration via Environment Variables
+  Scenario: Default volumes policy configured
     Given CAPI_JANITOR_DEFAULT_VOLUMES_POLICY = "keep"
-    When l'opérateur démarre
-    Then la politique par défaut pour tous les clusters est "keep"
+    When the operator starts
+    Then the default policy for all clusters is "keep"
 
-  Scenario: Délai de retry configurable
+  Scenario: Configurable retry delay
     Given CAPI_JANITOR_RETRY_DEFAULT_DELAY = "120"
-    When une erreur non classifiée se produit
-    Then le délai de retry est 120 secondes
+    When an unclassified error occurs
+    Then the retry delay is 120 seconds
 ```
 
 ---
 
-### Epic 10 — Packaging et déploiement
+### Epic 10 — Packaging and Deployment
 
-#### US10.1 — Image Docker
+#### US10.1 — Secure Image (Go Dockerfile)
 
 ```gherkin
-Feature: Image Docker de l'opérateur
-  Scenario: Build et push de l'image
-    Given le code source de l'opérateur Go
-    When le workflow GitHub Actions build-push-artifacts est déclenché
-    Then une image est publiée sur ghcr.io/azimuth-cloud/cluster-api-janitor-openstack
-    And l'image est taguée avec la version du chart
+Feature: Secure OCI Image for the Go Operator
+  Scenario: Multi-stage Go build
+    Given the Go operator source code
+    When the Dockerfile is built
+    Then the builder uses golang:1.26
+    And the runtime uses gcr.io/distroless/static:nonroot (UID 65532)
 
-  Scenario: Sécurité de l'image
-    Given l'image Docker
-    Then le processus tourne en tant que non-root
-    And le système de fichiers racine est en lecture seule
-    And toutes les capabilities Linux sont droppées
+  Scenario: Image security
+    Given the built image
+    Then the process runs as non-root (UID 65532)
+    And the root filesystem is read-only
+    And all Linux capabilities are dropped
 ```
 
-#### US10.2 — Helm chart
+#### US10.2 — Helm Chart
 
 ```gherkin
-Feature: Déploiement via Helm chart
-  Scenario: Installation avec les valeurs par défaut
-    Given le Helm chart cluster-api-janitor-openstack
-    When helm install est exécuté
-    Then un Deployment, ServiceAccount, ClusterRole et ClusterRoleBinding sont créés
-    And la politique volumes par défaut est "delete"
+Feature: Deployment via Helm Chart
+  Scenario: Installation with default values
+    Given the cluster-api-janitor-openstack Helm chart
+    When helm install is executed
+    Then a Deployment, ServiceAccount, ClusterRole, and ClusterRoleBinding are created
+    And the default volumes policy is "delete"
+    And the default retry delay is 60 seconds
 
-  Scenario: Override de la politique volumes
-    Given helm install avec --set defaultVolumesPolicy=keep
-    When le chart est déployé
-    Then la variable CAPI_JANITOR_DEFAULT_VOLUMES_POLICY = "keep" est injectée dans le pod
+  Scenario: Override volumes policy
+    Given helm install with --set defaultVolumesPolicy=keep
+    When the chart is deployed
+    Then the variable CAPI_JANITOR_DEFAULT_VOLUMES_POLICY = "keep" is injected into the pod
+
+  Scenario: Health probes active
+    Given the deployed Deployment
+    Then a livenessProbe on /healthz:8081 is configured
+    And a readinessProbe on /readyz:8081 is configured
+
+  Scenario: Complete RBAC
+    Given the deployed ClusterRole
+    Then the "update" verb is present on openstackclusters
+    (required for r.Update during finalizer management)
 ```
 
----
-
-### Epic 11 — Observabilité (nouvelle fonctionnalité)
-
-#### US11.1 — Métriques Prometheus
+#### US10.3 — OCI Build via Nix (without Flake) and SBOM
 
 ```gherkin
-Feature: Métriques Prometheus
-  Scenario: Comptage des purges réussies
-    Given une purge de cluster réussie
-    When les métriques sont exposées sur /metrics
-    Then le compteur "janitor_purge_total{status=success}" est incrémenté
+Feature: Reproducible OCI Build via Nix and SBOM Generation
+  Scenario: Build the amd64 image with Nix
+    Given the nix/default.nix file
+    When nix-build nix -A image is executed
+    Then an amd64 OCI image is produced (dockerTools.buildLayeredImage)
+    And the image runs as User 65532:65532
 
-  Scenario: Comptage des ressources supprimées par type
-    Given une purge ayant supprimé 3 FIPs, 2 LBs et 1 SG
-    When les métriques sont exposées
-    Then les jauges correspondantes reflètent les suppressions
+  Scenario: Build the arm64 image by cross-compilation
+    Given the nix/default.nix file
+    When nix-build nix -A image-arm64 is executed
+    Then an arm64 OCI image is produced via pkgsCross.aarch64-multiplatform
+    And both images are combined into a multi-arch manifest via skopeo + docker manifest
 
-  Scenario: Durée de purge
-    Given une purge terminée
-    When les métriques sont exposées
-    Then un histogramme "janitor_purge_duration_seconds" contient la durée de la purge
-```
-
-#### US11.2 — Status conditions sur OpenStackCluster
-
-```gherkin
-Feature: Status conditions sur OpenStackCluster
-  Scenario: Purge en cours
-    Given une purge démarrée pour le cluster "mycluster"
-    When la purge est en cours
-    Then une condition "JanitorCleanupComplete" avec status "False" et reason "CleanupInProgress" est posée
-
-  Scenario: Purge terminée avec succès
-    Given une purge réussie
-    When le finalizer est retiré
-    Then la condition "JanitorCleanupComplete" passe à status "True"
-
-  Scenario: Purge en erreur
-    Given une purge échouant avec une erreur
-    When l'erreur est gérée
-    Then la condition "JanitorCleanupComplete" a status "False" et reason "CleanupFailed" avec un message d'erreur
+  Scenario: CycloneDX SBOM generation
+    Given the compiled Go binary
+    When nix-build nix -A sbom is executed
+    Then an sbom.cdx.json file in CycloneDX format is produced
+    And it lists all Go modules (extracted from the buildinfo embedded in the binary)
+    And it is uploaded as an artefact of the GitHub Actions workflow
 ```
 
 ---
 
-### Epic 12 — Robustesse et extensibilité (nouvelles fonctionnalités)
+### Epic 11 — Observability
 
-#### US12.1 — Timeout configurable pour les appels OpenStack
+#### US11.1 — Prometheus Metrics
 
 ```gherkin
-Feature: Timeout HTTP configurable
-  Scenario: Appel OpenStack qui dépasse le timeout
-    Given CAPI_JANITOR_OPENSTACK_TIMEOUT = "30"
-    When un appel API OpenStack dépasse 30 secondes
-    Then le timeout est déclenché
-    And une erreur temporaire est loguée pour retry
+Feature: Prometheus Metrics
+  Scenario: Successful purge → success counter incremented
+    Given a cluster being deleted
+    When the OpenStack purge succeeds
+    Then capi_janitor_cleanups_total{result="success"} is incremented by 1
+
+  Scenario: Failed purge → failure counter incremented
+    Given a cluster being deleted
+    When the OpenStack purge fails
+    Then capi_janitor_cleanups_total{result="failure"} is incremented by 1
 ```
 
-#### US12.2 — Support des services Cinder avec alias
+> Implemented: `CounterVec` exposed via `ctrlmetrics.Registry` (port 8080/metrics).
+> `Metrics *Metrics` field is injectable on the reconciler (DI for tests).
+
+#### US11.2 — Kubernetes Events
 
 ```gherkin
-Feature: Détection du service Cinder avec alias
-  Scenario: Catalogue avec "volumev3"
-    Given un catalogue OpenStack avec le service type "volumev3"
-    When l'opérateur cherche le client Cinder
-    Then le client "volumev3" est utilisé
+Feature: Kubernetes Events on OpenStackCluster
+  Scenario: Successful purge → Normal "CleanupSucceeded" event
+    Given a cluster being deleted
+    When the OpenStack purge succeeds
+    Then a Normal event with reason "CleanupSucceeded" is emitted on the OpenStackCluster
 
-  Scenario: Catalogue avec "block-storage" uniquement
-    Given un catalogue OpenStack sans "volumev3" mais avec "block-storage"
-    When l'opérateur cherche le client Cinder
-    Then le client "block-storage" est utilisé
+  Scenario: Failed purge → Warning "CleanupFailed" event
+    Given a cluster being deleted
+    When the OpenStack purge fails
+    Then a Warning event with reason "CleanupFailed" and the error message is emitted
+```
 
-  Scenario: Catalogue sans service Cinder
-    Given un catalogue sans "volumev3" ni "block-storage"
-    When l'opérateur cherche le client Cinder
-    Then une CatalogError est levée avec le message approprié
+> Implemented: `record.EventRecorder` injectable on the reconciler; `SetupWithManager`
+> auto-initialises via `mgr.GetEventRecorderFor("capi-janitor")` when nil.
+
+---
+
+### Epic 12 — Robustness
+
+#### US12.1 — HTTP Client Timeout
+
+```gherkin
+Feature: HTTP Timeout on the OpenStack Client
+  Scenario: Context cancelled before the call
+    Given an already-cancelled context
+    When Authenticate is called
+    Then an error is returned immediately
+
+  Scenario: Safety net on the http.Client
+    Given no context with a deadline provided by the caller
+    Then the http.Client has a Timeout of 30 seconds
+    (prevents calls from blocking indefinitely when OpenStack is unreachable)
+```
+
+#### US12.2 — Cinder Service Legacy Aliases
+
+```gherkin
+Feature: Cinder Service Detection with Aliases
+  Scenario: Catalog with "volumev3" (standard >= Stein)
+    Given an OpenStack catalog with service type "volumev3"
+    When the operator looks up the Cinder client
+    Then the "volumev3" client is used
+
+  Scenario: Catalog with "block-storage" only
+    Given an OpenStack catalog without "volumev3" but with "block-storage"
+    When the operator looks up the Cinder client
+    Then the "block-storage" client is used
+
+  Scenario: Catalog with "volume" only (legacy alias < Stein)
+    Given an OpenStack catalog without "volumev3" or "block-storage" but with "volume"
+    When the operator looks up the Cinder client
+    Then the "volume" client is used
+
+  Scenario: Catalog without a Cinder service
+    Given a catalog without "volumev3", "block-storage", or "volume"
+    When the operator looks up the Cinder client
+    Then a CatalogError is raised with the appropriate message
 ```
 
 ---
 
 ## Actions
 
-1. [x] Réaliser un audit du code
-2. [ ] Écrire la feuille de route agile (ce document)
-3. [ ] Scaffolding du projet Go avec kubebuilder (`/kubebuilder`)
-4. [ ] Écrire les tests Go (TDD) pour chaque user story
-5. [ ] Implémenter les fonctionnalités en Go
-6. [ ] Migrer le Helm chart pour l'image Go
-7. [ ] Implémenter les epics 11 (observabilité) et 12 (robustesse)
+1. [x] Audit the existing code
+2. [x] Write the agile roadmap (this document)
+3. [x] Scaffold the Go project with kubebuilder
+4. [x] Write Go tests (TDD) for each user story
+5. [x] Implement the features in Go (108 tests)
+6. [x] Migrate the Helm chart for the Go image
+7. [x] Implement epics 11 (observability) and 12 (robustness)
+8. [x] OCI build via Nix (without Flake) + CycloneDX SBOM (US10.3 — outside initial plan)
 
-## Ordre d'implémentation suggéré
+## Final Result
+
+| Layer | Key Files |
+|---|---|
+| OpenStack client | `internal/openstack/cloud.go`, `resources.go`, `purge.go` |
+| Controller | `internal/controller/openstackcluster_controller.go`, `metrics.go` |
+| Config | `internal/controller/config.go` (env vars) |
+| Tests | 108 tests (4 packages) |
+| Packaging | `Dockerfile`, `nix/default.nix`, `nix/nixpkgs.nix` |
+| Helm | `chart/` — Deployment, ClusterRole, RBAC, health probes |
+| CI | `.github/workflows/build-push-artifacts.yaml` (Nix + skopeo + SBOM) |
+
+## Implementation Order
 
 ```
 Epic 1 (Auth) → Epic 2 (FIPs) → Epic 3 (LBs + PR #261)
 → Epic 4 (SGs) → Epic 5 (Volumes) → Epic 6 (Snapshots)
 → Epic 7 (AppCreds) → Epic 8 (Lifecycle K8s) → Epic 9 (Config)
-→ Epic 10 (Packaging) → Epic 11 (Observabilité) → Epic 12 (Robustesse)
+→ Epic 10 (Packaging + Nix/SBOM) → Epic 11 (Observability)
+→ Epic 12 (Robustness)
 ```
