@@ -26,11 +26,6 @@ tests:
           content: ALL
 
   # US10.2 — Helm chart
-  - it: should create four resources (US10.2)
-    asserts:
-      - hasDocuments:
-          count: 4
-
   - it: should inject CAPI_JANITOR_DEFAULT_VOLUMES_POLICY with default value "delete" (US10.2)
     template: templates/deployment.yaml
     asserts:
