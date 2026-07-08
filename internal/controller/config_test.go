@@ -12,9 +12,9 @@ import (
 	"github.com/azimuth-cloud/cluster-api-janitor-openstack/internal/openstack"
 )
 
-// ── US9.1: Configuration via variables d'environnement ────────────────────────
+// ── US9.1: Configuration via environment variables ────────────────────────
 
-// Scenario: CAPI_JANITOR_DEFAULT_VOLUMES_POLICY non définie → "delete"
+// Scenario: CAPI_JANITOR_DEFAULT_VOLUMES_POLICY not set → "delete"
 func TestDefaultVolumesFromEnv_DefaultsToDelete(t *testing.T) {
 	t.Setenv("CAPI_JANITOR_DEFAULT_VOLUMES_POLICY", "")
 	if got := controller.DefaultVolumesFromEnv(); got != controller.PolicyDelete {
@@ -30,7 +30,7 @@ func TestDefaultVolumesFromEnv_ReadsKeep(t *testing.T) {
 	}
 }
 
-// Scenario: CAPI_JANITOR_RETRY_DEFAULT_DELAY non définie → 60s (défaut)
+// Scenario: CAPI_JANITOR_RETRY_DEFAULT_DELAY not set → 60s (default)
 func TestRetryDelayFromEnv_DefaultsTo60(t *testing.T) {
 	t.Setenv("CAPI_JANITOR_RETRY_DEFAULT_DELAY", "")
 	if got := controller.RetryDelayFromEnv(); got != 60 {
@@ -54,7 +54,7 @@ func TestRetryDelayFromEnv_InvalidValue_FallsBackToDefault(t *testing.T) {
 	}
 }
 
-// ── Politique volumes via le reconciler ───────────────────────────────────────
+// ── Volume policy via the reconciler ───────────────────────────────────────
 
 func withVolumePolicy(policy string) func(*infrav1.OpenStackCluster) {
 	return func(c *infrav1.OpenStackCluster) {
@@ -84,7 +84,7 @@ func reconcileForVolumesCapture(t *testing.T, defaultPolicy string, clusterOpts 
 	return captured
 }
 
-// Scenario: Politique globale "delete" → volumes inclus dans la purge
+// Scenario: Global policy "delete" → volumes included in the purge
 func TestReconcile_VolumesPolicy_IncludesVolumes_WhenDelete(t *testing.T) {
 	opts := reconcileForVolumesCapture(t, controller.PolicyDelete)
 	if !opts.IncludeVolumes {
@@ -92,7 +92,7 @@ func TestReconcile_VolumesPolicy_IncludesVolumes_WhenDelete(t *testing.T) {
 	}
 }
 
-// Scenario: Politique globale "keep" → volumes exclus de la purge
+// Scenario: Global policy "keep" → volumes excluded from the purge
 func TestReconcile_VolumesPolicy_ExcludesVolumes_WhenKeep(t *testing.T) {
 	opts := reconcileForVolumesCapture(t, "keep")
 	if opts.IncludeVolumes {
@@ -100,7 +100,7 @@ func TestReconcile_VolumesPolicy_ExcludesVolumes_WhenKeep(t *testing.T) {
 	}
 }
 
-// Scenario: Annotation "delete" sur le cluster (override keep global)
+// Scenario: Annotation "delete" on the cluster (overrides global keep)
 func TestReconcile_VolumesPolicy_AnnotationDeleteOverridesKeepGlobal(t *testing.T) {
 	opts := reconcileForVolumesCapture(t, "keep", withVolumePolicy(controller.PolicyDelete))
 	if !opts.IncludeVolumes {
@@ -108,7 +108,7 @@ func TestReconcile_VolumesPolicy_AnnotationDeleteOverridesKeepGlobal(t *testing.
 	}
 }
 
-// Scenario: Annotation "keep" sur le cluster (override delete global)
+// Scenario: Annotation "keep" on the cluster (overrides global delete)
 func TestReconcile_VolumesPolicy_AnnotationKeepOverridesDeleteGlobal(t *testing.T) {
 	opts := reconcileForVolumesCapture(t, controller.PolicyDelete, withVolumePolicy("keep"))
 	if opts.IncludeVolumes {
@@ -116,9 +116,9 @@ func TestReconcile_VolumesPolicy_AnnotationKeepOverridesDeleteGlobal(t *testing.
 	}
 }
 
-// ── Délai de retry configurable ───────────────────────────────────────────────
+// ── Configurable retry delay ───────────────────────────────────────────────
 
-// Scenario: RetryDefaultDelay = 120 → sleep appelé avec 120 secondes
+// Scenario: RetryDefaultDelay = 120 → sleep called with 120 seconds
 func TestReconcile_RetryDelay_UsesConfiguredDelay(t *testing.T) {
 	cluster := newCluster("mycluster", "default",
 		withFinalizer,

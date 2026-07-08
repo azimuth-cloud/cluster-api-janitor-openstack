@@ -27,9 +27,9 @@ func newObsReconciler(
 	return r, rec
 }
 
-// ── US11.1 : Métriques Prometheus ────────────────────────────────────────────
+// ── US11.1: Prometheus Metrics ────────────────────────────────────────────
 
-// Scenario: nettoyage réussi → capi_janitor_cleanups_total{result="success"} += 1
+// Scenario: successful cleanup → capi_janitor_cleanups_total{result="success"} += 1
 func TestMetrics_IncrementsSuccess_OnCleanup(t *testing.T) {
 	cluster := newCluster("c", "default", withFinalizer, withDeletionTimestamp)
 	secret := newSecret("cloud-credentials", "default")
@@ -49,7 +49,7 @@ func TestMetrics_IncrementsSuccess_OnCleanup(t *testing.T) {
 	}
 }
 
-// Scenario: purge échouée → capi_janitor_cleanups_total{result="failure"} += 1
+// Scenario: failed purge → capi_janitor_cleanups_total{result="failure"} += 1
 func TestMetrics_IncrementsFailure_OnPurgeError(t *testing.T) {
 	cluster := newCluster("c", "default", withFinalizer, withDeletionTimestamp)
 	secret := newSecret("cloud-credentials", "default")
@@ -69,9 +69,9 @@ func TestMetrics_IncrementsFailure_OnPurgeError(t *testing.T) {
 	}
 }
 
-// ── US11.2 : Événements Kubernetes ───────────────────────────────────────────
+// ── US11.2: Kubernetes Events ───────────────────────────────────────────────
 
-// Scenario: nettoyage réussi → événement Normal "CleanupSucceeded"
+// Scenario: successful cleanup → Normal "CleanupSucceeded" event
 func TestEvents_EmitsNormal_OnCleanupSuccess(t *testing.T) {
 	cluster := newCluster("c", "default", withFinalizer, withDeletionTimestamp)
 	secret := newSecret("cloud-credentials", "default")
@@ -96,7 +96,7 @@ func TestEvents_EmitsNormal_OnCleanupSuccess(t *testing.T) {
 	}
 }
 
-// Scenario: purge échouée → événement Warning "CleanupFailed"
+// Scenario: failed purge → Warning "CleanupFailed" event
 func TestEvents_EmitsWarning_OnPurgeFailure(t *testing.T) {
 	cluster := newCluster("c", "default", withFinalizer, withDeletionTimestamp)
 	secret := newSecret("cloud-credentials", "default")

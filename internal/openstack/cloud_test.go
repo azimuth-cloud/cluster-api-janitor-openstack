@@ -167,14 +167,14 @@ func endpoint(iface, regionID, url string) map[string]any {
 	}
 }
 
-// ── US1.1: Authentification via Application Credential v3 ──────────────────
+// ── US1.1: Authentication via Application Credential v3 ────────────────────
 
-// Scenario: Authentification réussie
-// Given un clouds.yaml avec auth_type "v3applicationcredential"
-// And un application_credential_id et application_credential_secret valides
-// When l'opérateur initialise la connexion OpenStack
-// Then un token X-Auth-Token est obtenu depuis Keystone
-// And le catalogue de services est chargé
+// Scenario: Successful authentication
+// Given a clouds.yaml with auth_type "v3applicationcredential"
+// And a valid application_credential_id and application_credential_secret
+// When the operator initialises the OpenStack connection
+// Then an X-Auth-Token is obtained from Keystone
+// And the service catalog is loaded
 func TestAuthenticate_SuccessfulAuthentication(t *testing.T) {
 	ks := newKeystoneServer(t)
 	ks.catalog = catalogWith(
@@ -197,10 +197,10 @@ func TestAuthenticate_SuccessfulAuthentication(t *testing.T) {
 	}
 }
 
-// Scenario: Authentification avec un type non supporté
-// Given un clouds.yaml avec auth_type "password"
-// When l'opérateur tente de créer un client Cloud
-// Then une erreur UnsupportedAuthTypeError est levée
+// Scenario: Authentication with unsupported type
+// Given a clouds.yaml with auth_type "password"
+// When the operator attempts to create a Cloud client
+// Then an UnsupportedAuthTypeError is raised
 func TestAuthenticate_UnsupportedAuthType(t *testing.T) {
 	ks := newKeystoneServer(t)
 	clouds := buildCloudsYAML(ks.URL, "password")
@@ -219,7 +219,7 @@ func TestAuthenticate_UnsupportedAuthType(t *testing.T) {
 	}
 }
 
-// Scenario: Cloud manquant dans clouds.yaml
+// Scenario: Cloud missing in clouds.yaml
 func TestAuthenticate_CloudNotFound(t *testing.T) {
 	ks := newKeystoneServer(t)
 	clouds := buildCloudsYAML(ks.URL, "v3applicationcredential")
@@ -231,7 +231,7 @@ func TestAuthenticate_CloudNotFound(t *testing.T) {
 	}
 }
 
-// Scenario: clouds.yaml invalide (YAML malformé)
+// Scenario: Invalid clouds.yaml (malformed YAML)
 func TestAuthenticate_InvalidCloudsYAML(t *testing.T) {
 	_, err := openstack.Authenticate(context.Background(), "not: valid: yaml: :", "openstack", "")
 
@@ -240,14 +240,14 @@ func TestAuthenticate_InvalidCloudsYAML(t *testing.T) {
 	}
 }
 
-// ── US1.3: Gestion d'un credential révoqué ou invalide ─────────────────────
+// ── US1.3: Revoked or invalid credential handling ───────────────────────────
 
-// Scenario: Application credential supprimé avant la purge (token request → 404)
-// Given un cluster en cours de suppression
-// And l'application credential a déjà été supprimé
-// When l'opérateur tente de s'authentifier
-// Then is_authenticated retourne false
-// And aucune erreur fatale n'est levée
+// Scenario: Application credential deleted before purge (token request → 404)
+// Given a cluster being deleted
+// And the application credential has already been deleted
+// When the operator attempts to authenticate
+// Then is_authenticated returns false
+// And no fatal error is raised
 func TestAuthenticate_DeletedApplicationCredential_Returns404(t *testing.T) {
 	ks := newKeystoneServer(t)
 	ks.tokenStatus = http.StatusNotFound
@@ -263,9 +263,9 @@ func TestAuthenticate_DeletedApplicationCredential_Returns404(t *testing.T) {
 	}
 }
 
-// Scenario: Token request échoue avec une erreur non-404
-// When l'opérateur tente de s'authentifier
-// Then l'erreur est propagée
+// Scenario: Token request fails with a non-404 error
+// When the operator attempts to authenticate
+// Then the error is propagated
 func TestAuthenticate_TokenRequestFails_NonFatal(t *testing.T) {
 	for _, code := range []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusInternalServerError} {
 		code := code
@@ -283,11 +283,11 @@ func TestAuthenticate_TokenRequestFails_NonFatal(t *testing.T) {
 	}
 }
 
-// Scenario: Catalogue retourne 404
-// Given une URL Keystone valide mais le catalogue retourne 404
-// When l'opérateur charge le catalogue
-// Then is_authenticated retourne false
-// And aucune erreur fatale n'est levée
+// Scenario: Catalog returns 404
+// Given a valid Keystone URL but the catalog returns 404
+// When the operator loads the catalog
+// Then is_authenticated returns false
+// And no fatal error is raised
 func TestAuthenticate_CatalogReturns404(t *testing.T) {
 	ks := newKeystoneServer(t)
 	ks.catalogStatus = http.StatusNotFound
@@ -303,13 +303,13 @@ func TestAuthenticate_CatalogReturns404(t *testing.T) {
 	}
 }
 
-// ── US1.2: Filtrage du catalogue par interface et région ────────────────────
+// ── US1.2: Catalog filtering by interface and region ────────────────────────
 
-// Scenario: Endpoint sélectionné selon l'interface configurée
-// Given un catalogue avec des endpoints "public" et "internal"
-// And l'interface configurée est "public"
-// When le catalogue est chargé
-// Then seuls les endpoints "public" sont retenus
+// Scenario: Endpoint selected by configured interface
+// Given a catalog with "public" and "internal" endpoints
+// And the configured interface is "public"
+// When the catalog is loaded
+// Then only "public" endpoints are retained
 func TestAuthenticate_FiltersByInterface_Public(t *testing.T) {
 	ks := newKeystoneServer(t)
 	ks.catalog = catalogWith(
@@ -341,7 +341,7 @@ func TestAuthenticate_FiltersByInterface_Public(t *testing.T) {
 	}
 }
 
-// Scenario: Endpoint sélectionné selon l'interface configurée (internal)
+// Scenario: Endpoint selected by configured interface (internal)
 func TestAuthenticate_FiltersByInterface_Internal(t *testing.T) {
 	ks := newKeystoneServer(t)
 	ks.catalog = catalogWith(
@@ -367,11 +367,11 @@ func TestAuthenticate_FiltersByInterface_Internal(t *testing.T) {
 	}
 }
 
-// Scenario: Endpoint sélectionné selon la région configurée
-// Given un catalogue avec des endpoints pour "RegionOne" et "RegionTwo"
-// And la région configurée est "RegionOne"
-// When le catalogue est chargé
-// Then seuls les endpoints de "RegionOne" sont retenus
+// Scenario: Endpoint selected by configured region
+// Given a catalog with endpoints for "RegionOne" and "RegionTwo"
+// And the configured region is "RegionOne"
+// When the catalog is loaded
+// Then only "RegionOne" endpoints are retained
 func TestAuthenticate_FiltersByRegion(t *testing.T) {
 	ks := newKeystoneServer(t)
 	ks.catalog = catalogWith(
@@ -397,11 +397,11 @@ func TestAuthenticate_FiltersByRegion(t *testing.T) {
 	}
 }
 
-// Scenario: Aucune région configurée
-// Given un catalogue avec des endpoints dans plusieurs régions
-// And aucune région n'est configurée
-// When le catalogue est chargé
-// Then le premier endpoint correspondant à l'interface est retenu pour chaque service
+// Scenario: No region configured
+// Given a catalog with endpoints in multiple regions
+// And no region is configured
+// When the catalog is loaded
+// Then the first endpoint matching the interface is retained for each service
 func TestAuthenticate_NoRegionFilter_AcceptsAllRegions(t *testing.T) {
 	ks := newKeystoneServer(t)
 	ks.catalog = catalogWith(
@@ -427,7 +427,7 @@ func TestAuthenticate_NoRegionFilter_AcceptsAllRegions(t *testing.T) {
 	}
 }
 
-// Scenario: Catalogue avec plusieurs services
+// Scenario: Catalog with multiple services
 func TestAuthenticate_MultipleServicesInCatalog(t *testing.T) {
 	ks := newKeystoneServer(t)
 	ks.catalog = catalogWith(
@@ -455,7 +455,7 @@ func TestAuthenticate_MultipleServicesInCatalog(t *testing.T) {
 	}
 }
 
-// Scenario: Catalogue vide → non authentifié
+// Scenario: Empty catalog → unauthenticated
 func TestAuthenticate_EmptyCatalog_NotAuthenticated(t *testing.T) {
 	ks := newKeystoneServer(t)
 	ks.catalog = catalogWith() // no services
@@ -471,13 +471,13 @@ func TestAuthenticate_EmptyCatalog_NotAuthenticated(t *testing.T) {
 	}
 }
 
-// ── US1.4: Support des certificats CA personnalisés ─────────────────────────
+// ── US1.4: Custom CA certificate support ────────────────────────────────────
 
-// Scenario: CA fourni dans le secret Kubernetes
-// Given un secret Kubernetes contenant une entrée "cacert"
-// When l'opérateur initialise le transport TLS
-// Then le CA est chargé dans le contexte SSL
-// And les appels HTTPS vers OpenStack utilisent ce CA pour la vérification
+// Scenario: CA provided in the Kubernetes secret
+// Given a Kubernetes secret containing a "cacert" entry
+// When the operator initialises the TLS transport
+// Then the CA is loaded into the SSL context
+// And HTTPS calls to OpenStack use this CA for verification
 func TestAuthenticate_WithCustomCACert(t *testing.T) {
 	ks := newTLSKeystoneServer(t)
 	ks.catalog = catalogWith(
@@ -509,7 +509,7 @@ func TestAuthenticate_WithCustomCACert(t *testing.T) {
 	}
 }
 
-// Scenario: Pas de CA fourni → CA système utilisé (connexion HTTP doit fonctionner)
+// Scenario: No CA provided → system CA used (plain HTTP connection must work)
 func TestAuthenticate_NoCACert_HTTPServerWorks(t *testing.T) {
 	ks := newKeystoneServer(t) // plain HTTP
 	ks.catalog = catalogWith(
@@ -529,7 +529,7 @@ func TestAuthenticate_NoCACert_HTTPServerWorks(t *testing.T) {
 	}
 }
 
-// Scenario: CA fourni mais invalide → TLS doit échouer
+// Scenario: CA provided but invalid → TLS must fail
 func TestAuthenticate_InvalidCACert_TLSFails(t *testing.T) {
 	ks := newTLSKeystoneServer(t)
 
@@ -544,7 +544,7 @@ func TestAuthenticate_InvalidCACert_TLSFails(t *testing.T) {
 
 // ── AppCredentialID ─────────────────────────────────────────────────────────
 
-// Scenario: Extraction de l'ID d'application credential depuis clouds.yaml
+// Scenario: Extracting application credential ID from clouds.yaml
 func TestAppCredentialID_Found(t *testing.T) {
 	clouds := `
 clouds:
@@ -564,7 +564,7 @@ clouds:
 	}
 }
 
-// Scenario: Cloud absent → erreur
+// Scenario: Cloud absent → error
 func TestAppCredentialID_CloudNotFound(t *testing.T) {
 	clouds := `
 clouds:

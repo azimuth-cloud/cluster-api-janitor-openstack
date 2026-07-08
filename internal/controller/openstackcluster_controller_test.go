@@ -105,9 +105,9 @@ func getClusterOrNil(t *testing.T, c client.Client, name, namespace string) *inf
 	return &cluster
 }
 
-// ── US8.1: Ajouter un finalizer ───────────────────────────────────────────────
+// ── US8.1: Add a finalizer ───────────────────────────────────────────────────
 
-// Scenario: Cluster sans deletionTimestamp et sans finalizer → finalizer ajouté
+// Scenario: Cluster without deletionTimestamp and without finalizer → finalizer added
 func TestReconcile_AddsFinalizer_WhenNotPresent(t *testing.T) {
 	cluster := newCluster("mycluster", "default")
 	r, c := newReconciler(nil, cluster)
@@ -125,7 +125,7 @@ func TestReconcile_AddsFinalizer_WhenNotPresent(t *testing.T) {
 	}
 }
 
-// Scenario: Cluster avec finalizer déjà présent → aucun changement d'état
+// Scenario: Cluster with finalizer already present → no state change
 func TestReconcile_FinalizerAlreadyPresent_Idempotent(t *testing.T) {
 	cluster := newCluster("mycluster", "default", withFinalizer)
 	r, c := newReconciler(nil, cluster)
@@ -143,9 +143,9 @@ func TestReconcile_FinalizerAlreadyPresent_Idempotent(t *testing.T) {
 	}
 }
 
-// ── US8.2: Nom du cluster depuis le label ou metadata.name ───────────────────
+// ── US8.2: Cluster name from label or metadata.name ──────────────────────────
 
-// Scenario: Label cluster.x-k8s.io/cluster-name présent → nom du label utilisé
+// Scenario: Label cluster.x-k8s.io/cluster-name present → label name used
 func TestReconcile_ClusterName_FromLabel(t *testing.T) {
 	cluster := newCluster("mycluster-openstack", "default",
 		withFinalizer,
@@ -169,7 +169,7 @@ func TestReconcile_ClusterName_FromLabel(t *testing.T) {
 	}
 }
 
-// Scenario: Label absent → metadata.name utilisé
+// Scenario: Label absent → metadata.name used
 func TestReconcile_ClusterName_FallsBackToMetadataName(t *testing.T) {
 	cluster := newCluster("mycluster", "default", withFinalizer, withDeletionTimestamp)
 	secret := newSecret("cloud-credentials", "default")
@@ -189,9 +189,9 @@ func TestReconcile_ClusterName_FallsBackToMetadataName(t *testing.T) {
 	}
 }
 
-// ── US8.3: Supprimer le finalizer après nettoyage réussi ─────────────────────
+// ── US8.3: Remove the finalizer after successful cleanup ─────────────────────
 
-// Scenario: Purge réussie → finalizer retiré
+// Scenario: Successful purge → finalizer removed
 func TestReconcile_RemovesFinalizer_AfterSuccessfulPurge(t *testing.T) {
 	cluster := newCluster("mycluster", "default", withFinalizer, withDeletionTimestamp)
 	secret := newSecret("cloud-credentials", "default")
@@ -209,7 +209,7 @@ func TestReconcile_RemovesFinalizer_AfterSuccessfulPurge(t *testing.T) {
 	}
 }
 
-// Scenario: Finalizer absent au moment de la suppression → pas de purge
+// Scenario: Finalizer absent at deletion time → no purge
 func TestReconcile_SkipsCleanup_WhenFinalizerAbsent(t *testing.T) {
 	// Use a non-janitor finalizer to keep the cluster alive in the fake client
 	// when we call Delete (which sets DeletionTimestamp instead of deleting immediately).
@@ -236,9 +236,9 @@ func TestReconcile_SkipsCleanup_WhenFinalizerAbsent(t *testing.T) {
 	}
 }
 
-// ── US8.4: Mécanisme de retry via annotation ──────────────────────────────────
+// ── US8.4: Retry mechanism via annotation ────────────────────────────────────
 
-// Scenario: Erreur lors de la purge → annotation retry posée, Reconcile retourne nil
+// Scenario: Error during purge → retry annotation set, Reconcile returns nil
 func TestReconcile_AnnotatesRetry_OnPurgeError(t *testing.T) {
 	cluster := newCluster("mycluster", "default", withFinalizer, withDeletionTimestamp)
 	secret := newSecret("cloud-credentials", "default")
@@ -260,7 +260,7 @@ func TestReconcile_AnnotatesRetry_OnPurgeError(t *testing.T) {
 	}
 }
 
-// Scenario: Cluster supprimé entre l'erreur de purge et l'annotation retry → NotFound ignoré
+// Scenario: Cluster deleted between purge error and retry annotation → NotFound ignored
 func TestReconcile_IgnoresNotFound_WhenClusterDeletedDuringRetry(t *testing.T) {
 	cluster := newCluster("mycluster", "default", withFinalizer, withDeletionTimestamp)
 	secret := newSecret("cloud-credentials", "default")

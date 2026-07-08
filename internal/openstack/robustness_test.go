@@ -16,7 +16,7 @@ import (
 
 // ── US12.1 : Timeout HTTP ─────────────────────────────────────────────────────
 
-// Scenario: le contexte est déjà annulé → Authenticate retourne une erreur immédiatement
+// Scenario: context already cancelled → Authenticate returns an error immediately
 func TestAuthenticate_ReturnsError_WhenContextAlreadyCancelled(t *testing.T) {
 	// Use a real (if short-lived) server so Authenticate reaches the HTTP call.
 	ks := newKeystoneServer(t)
@@ -125,7 +125,7 @@ clouds:
 	return session
 }
 
-// Scenario: catalog avec "block-storage" → cinderEndpoint résout le bon endpoint
+// Scenario: catalog with "block-storage" → cinderEndpoint resolves the correct endpoint
 func TestCinderEndpoint_FallsBackToBlockStorage(t *testing.T) {
 	srv := newCinderAliasServer(t, "block-storage")
 	session := srv.authenticate(t)
@@ -139,7 +139,7 @@ func TestCinderEndpoint_FallsBackToBlockStorage(t *testing.T) {
 	}
 }
 
-// Scenario: catalog avec "volume" uniquement → cinderEndpoint utilise l'alias legacy
+// Scenario: catalog with "volume" only → cinderEndpoint uses the legacy alias
 func TestCinderEndpoint_FallsBackToVolumeAlias(t *testing.T) {
 	srv := newCinderAliasServer(t, "volume")
 	session := srv.authenticate(t)

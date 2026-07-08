@@ -286,11 +286,11 @@ func lbKubeName(cluster, suffix string) string {
 	return fmt.Sprintf("kube_service_%s_%s", cluster, suffix)
 }
 
-// ── US2.1: Identifier les Floating IPs d'un cluster ──────────────────────────
+// ── US2.1: Identify Floating IPs of a cluster ────────────────────────────────
 
-// Scenario: FIP appartenant au cluster → incluse dans la suppression
-// Scenario: FIP d'un autre cluster → exclue
-// Scenario: FIP sans description Kubernetes → exclue
+// Scenario: FIP belonging to the cluster → included in deletion
+// Scenario: FIP from another cluster → excluded
+// Scenario: FIP without Kubernetes description → excluded
 func TestDeleteFloatingIPs_Filtering(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -347,7 +347,7 @@ func TestDeleteFloatingIPs_Filtering(t *testing.T) {
 	}
 }
 
-// Scenario: FIPs de plusieurs clusters → seules celles du bon cluster sont supprimées
+// Scenario: FIPs from multiple clusters → only those matching the target cluster are deleted
 func TestDeleteFloatingIPs_MultipleIPsPartialMatch(t *testing.T) {
 	srv := newNetworkTestServer(t)
 	fips := []fipRecord{
@@ -378,12 +378,12 @@ func TestDeleteFloatingIPs_MultipleIPsPartialMatch(t *testing.T) {
 	}
 }
 
-// ── US2.2: Supprimer les Floating IPs ────────────────────────────────────────
+// ── US2.2: Delete Floating IPs ───────────────────────────────────────────────
 
-// Scenario: Suppression réussie
-// Given une FIP appartenant au cluster "mycluster"
-// When la purge des FIPs est déclenchée
-// Then la FIP est supprimée via l'API Neutron
+// Scenario: Successful deletion
+// Given a FIP belonging to cluster "mycluster"
+// When the FIP purge is triggered
+// Then the FIP is deleted via the Neutron API
 func TestDeleteFloatingIPs_SuccessfulDeletion(t *testing.T) {
 	srv := newNetworkTestServer(t)
 	fips := []fipRecord{
@@ -415,10 +415,10 @@ func TestDeleteFloatingIPs_SuccessfulDeletion(t *testing.T) {
 	}
 }
 
-// Scenario: Erreur HTTP 400 lors de la suppression
-// Then un warning est émis
-// And la suppression continue pour les autres FIPs
-// And vérification déclenchée (check_fips = true)
+// Scenario: HTTP 400 error during deletion
+// Then a warning is emitted
+// And deletion continues for other FIPs
+// And verification is triggered (check_fips = true)
 func TestDeleteFloatingIPs_TransientError400_ContinuesAndVerifies(t *testing.T) {
 	srv := newNetworkTestServer(t)
 	fips := []fipRecord{
@@ -451,7 +451,7 @@ func TestDeleteFloatingIPs_TransientError400_ContinuesAndVerifies(t *testing.T) 
 	}
 }
 
-// Scenario: Erreur HTTP 409 (Conflict) → même comportement que 400
+// Scenario: HTTP 409 error (Conflict) → same behaviour as 400
 func TestDeleteFloatingIPs_TransientError409_Continues(t *testing.T) {
 	srv := newNetworkTestServer(t)
 	fips := []fipRecord{
@@ -466,7 +466,7 @@ func TestDeleteFloatingIPs_TransientError409_Continues(t *testing.T) {
 	}
 }
 
-// Scenario: Erreur HTTP 500 → exception propagée
+// Scenario: HTTP 500 error → exception propagated
 func TestDeleteFloatingIPs_HTTP500_PropagatesError(t *testing.T) {
 	srv := newNetworkTestServer(t)
 	fips := []fipRecord{
@@ -483,8 +483,8 @@ func TestDeleteFloatingIPs_HTTP500_PropagatesError(t *testing.T) {
 	}
 }
 
-// Scenario: FIPs toujours présentes après suppression → erreur retournée
-// (le contrôleur réessaiera via l'annotation retry)
+// Scenario: FIPs still present after deletion → error returned
+// (the controller will retry via the retry annotation)
 func TestDeleteFloatingIPs_StillPresentAfterDeletion_ReturnsError(t *testing.T) {
 	srv := newNetworkTestServer(t)
 	fip := fipRecord{ID: "fip-persistent", Description: fipDesc("mycluster")}
@@ -502,7 +502,7 @@ func TestDeleteFloatingIPs_StillPresentAfterDeletion_ReturnsError(t *testing.T) 
 	}
 }
 
-// Scenario: Aucune FIP correspondante → pas de suppression, pas de vérification
+// Scenario: No matching FIP → no deletion, no verification
 func TestDeleteFloatingIPs_NothingToDelete_NoVerification(t *testing.T) {
 	srv := newNetworkTestServer(t)
 	srv.fipLists = [][]fipRecord{{}} // empty list
@@ -553,13 +553,13 @@ func TestDeleteFloatingIPs_NoNetworkEndpoint_ReturnsCatalogError(t *testing.T) {
 	}
 }
 
-// ── Epic 3: Nettoyage des Load Balancers Octavia ──────────────────────────────
+// ── Epic 3: Octavia Load Balancer Cleanup ─────────────────────────────────────
 
-// ── US3.1: Identifier les Load Balancers Kubernetes ──────────────────────────
+// ── US3.1: Identify Kubernetes Load Balancers ─────────────────────────────────
 
-// Scenario: LB appartenant au cluster → inclus dans la suppression
-// Scenario: LB d'un autre cluster → exclu
-// Scenario: LB sans préfixe kube_service → exclu
+// Scenario: LB belonging to the cluster → included in deletion
+// Scenario: LB from another cluster → excluded
+// Scenario: LB without kube_service prefix → excluded
 func TestDeleteLoadBalancers_Filtering(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -609,9 +609,9 @@ func TestDeleteLoadBalancers_Filtering(t *testing.T) {
 	}
 }
 
-// ── US3.2: Erreur HTTP lors du listing (PR #261) ──────────────────────────────
+// ── US3.2: HTTP error during listing (PR #261) ───────────────────────────────
 
-// Scenario: Erreur HTTP lors du listing des LBs → log ERROR, pas d'exception
+// Scenario: HTTP error during LB listing → ERROR log, no exception
 func TestDeleteLoadBalancers_ListError_LogsAndSkips(t *testing.T) {
 	srv := newLBTestServer(t)
 	srv.listStatusOverride = http.StatusInternalServerError
@@ -630,9 +630,9 @@ func TestDeleteLoadBalancers_ListError_LogsAndSkips(t *testing.T) {
 	}
 }
 
-// ── US3.3: Supprimer les Load Balancers en cascade ───────────────────────────
+// ── US3.3: Delete Load Balancers with cascade ─────────────────────────────────
 
-// Scenario: Suppression réussie avec cascade=true
+// Scenario: Successful deletion with cascade=true
 func TestDeleteLoadBalancers_SuccessfulDeletion(t *testing.T) {
 	srv := newLBTestServer(t)
 	lbs := []lbRecord{
@@ -664,7 +664,7 @@ func TestDeleteLoadBalancers_SuccessfulDeletion(t *testing.T) {
 	}
 }
 
-// Scenario: DELETE émis avec cascade=true
+// Scenario: DELETE issued with cascade=true
 func TestDeleteLoadBalancers_CascadeDelete(t *testing.T) {
 	srv := newLBTestServer(t)
 	srv.lbLists = [][]lbRecord{
@@ -691,7 +691,7 @@ func TestDeleteLoadBalancers_CascadeDelete(t *testing.T) {
 	}
 }
 
-// Scenario: Erreur HTTP 400 lors de la suppression → warning, continue, vérification déclenchée
+// Scenario: HTTP 400 error during deletion → warning, continues, verification triggered
 func TestDeleteLoadBalancers_TransientError400_ContinuesAndVerifies(t *testing.T) {
 	srv := newLBTestServer(t)
 	lbs := []lbRecord{
@@ -721,7 +721,7 @@ func TestDeleteLoadBalancers_TransientError400_ContinuesAndVerifies(t *testing.T
 	}
 }
 
-// Scenario: Erreur HTTP 500 → exception propagée
+// Scenario: HTTP 500 error → exception propagated
 func TestDeleteLoadBalancers_HTTP500_PropagatesError(t *testing.T) {
 	srv := newLBTestServer(t)
 	srv.lbLists = [][]lbRecord{
@@ -737,7 +737,7 @@ func TestDeleteLoadBalancers_HTTP500_PropagatesError(t *testing.T) {
 	}
 }
 
-// Scenario: LBs toujours présents après suppression → erreur retournée
+// Scenario: LBs still present after deletion → error returned
 func TestDeleteLoadBalancers_StillPresentAfterDeletion_ReturnsError(t *testing.T) {
 	srv := newLBTestServer(t)
 	lb := lbRecord{ID: "lb-persistent", Name: lbKubeName("mycluster", "svc")}
@@ -754,7 +754,7 @@ func TestDeleteLoadBalancers_StillPresentAfterDeletion_ReturnsError(t *testing.T
 	}
 }
 
-// Scenario: Aucun LB correspondant → pas de suppression, pas de vérification
+// Scenario: No matching LB → no deletion, no verification
 func TestDeleteLoadBalancers_NothingToDelete_NoVerification(t *testing.T) {
 	srv := newLBTestServer(t)
 	srv.lbLists = [][]lbRecord{{}}
@@ -911,7 +911,7 @@ func sgDesc(cluster string) string {
 	return fmt.Sprintf("Security Group for Service LoadBalancer in cluster %s", cluster)
 }
 
-// Scenario: Pas d'endpoint "load-balancer" dans le catalogue → retour nil (LBs ignorés)
+// Scenario: No "load-balancer" endpoint in catalog → return nil (LBs skipped)
 func TestDeleteLoadBalancers_NoLoadBalancerEndpoint_Skips(t *testing.T) {
 	ks := newKeystoneServer(t)
 	ks.catalog = catalogWith(
@@ -932,13 +932,13 @@ func TestDeleteLoadBalancers_NoLoadBalancerEndpoint_Skips(t *testing.T) {
 	}
 }
 
-// ── Epic 4: Nettoyage des Security Groups ────────────────────────────────────
+// ── Epic 4: Security Group Cleanup ───────────────────────────────────────────
 
-// ── US4.1: Identifier les Security Groups d'un cluster ───────────────────────
+// ── US4.1: Identify Security Groups of a cluster ─────────────────────────────
 
-// Scenario: SG appartenant au cluster → inclus dans la suppression
-// Scenario: SG d'un autre cluster → exclu
-// Scenario: Description ne correspondant pas → exclu
+// Scenario: SG belonging to the cluster → included in deletion
+// Scenario: SG from another cluster → excluded
+// Scenario: Non-matching description → excluded
 func TestDeleteSecurityGroups_Filtering(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -994,9 +994,9 @@ func TestDeleteSecurityGroups_Filtering(t *testing.T) {
 	}
 }
 
-// ── US4.2: Supprimer les Security Groups ──────────────────────────────────────
+// ── US4.2: Delete Security Groups ────────────────────────────────────────────
 
-// Scenario: Suppression réussie
+// Scenario: Successful deletion
 func TestDeleteSecurityGroups_SuccessfulDeletion(t *testing.T) {
 	srv := newSGTestServer(t)
 	sgs := []sgRecord{
@@ -1028,7 +1028,7 @@ func TestDeleteSecurityGroups_SuccessfulDeletion(t *testing.T) {
 	}
 }
 
-// Scenario: SG encore utilisé (HTTP 409) → warning, continue, vérification déclenchée
+// Scenario: SG still in use (HTTP 409) → warning, continues, verification triggered
 func TestDeleteSecurityGroups_TransientError409_ContinuesAndVerifies(t *testing.T) {
 	srv := newSGTestServer(t)
 	sgs := []sgRecord{
@@ -1059,7 +1059,7 @@ func TestDeleteSecurityGroups_TransientError409_ContinuesAndVerifies(t *testing.
 	}
 }
 
-// Scenario: Erreur HTTP 500 → exception propagée
+// Scenario: HTTP 500 error → exception propagated
 func TestDeleteSecurityGroups_HTTP500_PropagatesError(t *testing.T) {
 	srv := newSGTestServer(t)
 	srv.sgLists = [][]sgRecord{
@@ -1075,7 +1075,7 @@ func TestDeleteSecurityGroups_HTTP500_PropagatesError(t *testing.T) {
 	}
 }
 
-// Scenario: SGs toujours présents après suppression → erreur retournée
+// Scenario: SGs still present after deletion → error returned
 func TestDeleteSecurityGroups_StillPresentAfterDeletion_ReturnsError(t *testing.T) {
 	srv := newSGTestServer(t)
 	sg := sgRecord{ID: "sg-persistent", Description: sgDesc("mycluster")}
@@ -1092,7 +1092,7 @@ func TestDeleteSecurityGroups_StillPresentAfterDeletion_ReturnsError(t *testing.
 	}
 }
 
-// Scenario: Aucun SG correspondant → pas de suppression, pas de vérification
+// Scenario: No matching SG → no deletion, no verification
 func TestDeleteSecurityGroups_NothingToDelete_NoVerification(t *testing.T) {
 	srv := newSGTestServer(t)
 	srv.sgLists = [][]sgRecord{{}}
@@ -1241,14 +1241,14 @@ clouds:
 	return session
 }
 
-// ── Epic 5: Gestion des Volumes Cinder ───────────────────────────────────────
+// ── Epic 5: Cinder Volume Management ─────────────────────────────────────────
 
-// ── US5.1: Identifier les volumes d'un cluster ───────────────────────────────
+// ── US5.1: Identify volumes of a cluster ─────────────────────────────────────
 
-// Scenario: Volume du bon cluster sans keep → supprimé
-// Scenario: Volume avec keep=true → conservé
-// Scenario: Volume d'un autre cluster → exclu
-// Scenario: Volume sans métadonnée CSI → exclu
+// Scenario: Volume from the correct cluster without keep → deleted
+// Scenario: Volume with keep=true → kept
+// Scenario: Volume from another cluster → excluded
+// Scenario: Volume without CSI metadata → excluded
 func TestDeleteVolumes_Filtering(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -1307,7 +1307,7 @@ func TestDeleteVolumes_Filtering(t *testing.T) {
 	}
 }
 
-// Scenario: Suppression réussie de plusieurs volumes
+// Scenario: Successful deletion of multiple volumes
 func TestDeleteVolumes_SuccessfulDeletion(t *testing.T) {
 	srv := newCinderTestServer(t)
 	vols := []cinderVolumeRecord{
@@ -1339,7 +1339,7 @@ func TestDeleteVolumes_SuccessfulDeletion(t *testing.T) {
 	}
 }
 
-// Scenario: Erreur HTTP 409 (transiente) → warning, continue, vérification déclenchée
+// Scenario: Transient HTTP 409 error → warning, continues, verification triggered
 func TestDeleteVolumes_TransientError409_ContinuesAndVerifies(t *testing.T) {
 	srv := newCinderTestServer(t)
 	vols := []cinderVolumeRecord{
@@ -1369,7 +1369,7 @@ func TestDeleteVolumes_TransientError409_ContinuesAndVerifies(t *testing.T) {
 	}
 }
 
-// Scenario: Erreur HTTP 500 → exception propagée
+// Scenario: HTTP 500 error → exception propagated
 func TestDeleteVolumes_HTTP500_PropagatesError(t *testing.T) {
 	srv := newCinderTestServer(t)
 	srv.volumeLists = [][]cinderVolumeRecord{
@@ -1385,7 +1385,7 @@ func TestDeleteVolumes_HTTP500_PropagatesError(t *testing.T) {
 	}
 }
 
-// Scenario: Volume toujours présent après suppression → erreur retournée
+// Scenario: Volume still present after deletion → error returned
 func TestDeleteVolumes_StillPresentAfterDeletion_ReturnsError(t *testing.T) {
 	srv := newCinderTestServer(t)
 	vol := cinderVolumeRecord{
@@ -1405,7 +1405,7 @@ func TestDeleteVolumes_StillPresentAfterDeletion_ReturnsError(t *testing.T) {
 	}
 }
 
-// Scenario: Aucun volume correspondant → pas de suppression, pas de vérification
+// Scenario: No matching volume → no deletion, no verification
 func TestDeleteVolumes_NothingToDelete_NoVerification(t *testing.T) {
 	srv := newCinderTestServer(t)
 	srv.volumeLists = [][]cinderVolumeRecord{{}}
@@ -1548,12 +1548,12 @@ clouds:
 	return session
 }
 
-// ── Epic 6: Gestion des Snapshots Cinder ─────────────────────────────────────
+// ── Epic 6: Cinder Snapshot Management ───────────────────────────────────────
 
-// ── US6.1: Identifier et supprimer les snapshots d'un cluster ────────────────
+// ── US6.1: Identify and delete snapshots of a cluster ────────────────────────
 
-// Scenario: Snapshot du bon cluster → supprimé
-// Scenario: Snapshot d'un autre cluster → exclu
+// Scenario: Snapshot from the correct cluster → deleted
+// Scenario: Snapshot from another cluster → excluded
 func TestDeleteSnapshots_Filtering(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -1603,7 +1603,7 @@ func TestDeleteSnapshots_Filtering(t *testing.T) {
 	}
 }
 
-// Scenario: Suppression réussie de plusieurs snapshots
+// Scenario: Successful deletion of multiple snapshots
 func TestDeleteSnapshots_SuccessfulDeletion(t *testing.T) {
 	srv := newSnapshotTestServer(t)
 	snaps := []cinderVolumeRecord{
@@ -1635,7 +1635,7 @@ func TestDeleteSnapshots_SuccessfulDeletion(t *testing.T) {
 	}
 }
 
-// Scenario: Erreur HTTP 409 (transiente) → warning, continue, vérification déclenchée
+// Scenario: Transient HTTP 409 error → warning, continues, verification triggered
 func TestDeleteSnapshots_TransientError409_ContinuesAndVerifies(t *testing.T) {
 	srv := newSnapshotTestServer(t)
 	snaps := []cinderVolumeRecord{
@@ -1665,7 +1665,7 @@ func TestDeleteSnapshots_TransientError409_ContinuesAndVerifies(t *testing.T) {
 	}
 }
 
-// Scenario: Erreur HTTP 500 → exception propagée
+// Scenario: HTTP 500 error → exception propagated
 func TestDeleteSnapshots_HTTP500_PropagatesError(t *testing.T) {
 	srv := newSnapshotTestServer(t)
 	srv.snapshotLists = [][]cinderVolumeRecord{
@@ -1681,7 +1681,7 @@ func TestDeleteSnapshots_HTTP500_PropagatesError(t *testing.T) {
 	}
 }
 
-// Scenario: Snapshot toujours présent après suppression → erreur retournée
+// Scenario: Snapshot still present after deletion → error returned
 func TestDeleteSnapshots_StillPresentAfterDeletion_ReturnsError(t *testing.T) {
 	srv := newSnapshotTestServer(t)
 	snap := cinderVolumeRecord{
@@ -1800,11 +1800,11 @@ clouds:
 	return session, cloudsYAML
 }
 
-// ── Epic 7: Gestion des Application Credentials ───────────────────────────────
+// ── Epic 7: Application Credential Management ─────────────────────────────────
 
-// ── US7.1: Supprimer l'Application Credential OpenStack ──────────────────────
+// ── US7.1: Delete the OpenStack Application Credential ───────────────────────
 
-// Scenario: Suppression autorisée → HTTP 204, retour nil
+// Scenario: Deletion authorised → HTTP 204, return nil
 func TestDeleteAppCredential_SuccessfulDeletion(t *testing.T) {
 	srv := newIdentityTestServer(t)
 	session, cloudsYAML := srv.authenticate(t)
@@ -1822,7 +1822,7 @@ func TestDeleteAppCredential_SuccessfulDeletion(t *testing.T) {
 	}
 }
 
-// Scenario: Application Credential déjà supprimé → HTTP 404, retour nil
+// Scenario: Application Credential already deleted → HTTP 404, return nil
 func TestDeleteAppCredential_AlreadyDeleted_404(t *testing.T) {
 	srv := newIdentityTestServer(t)
 	srv.deleteStatus = http.StatusNotFound
@@ -1833,7 +1833,7 @@ func TestDeleteAppCredential_AlreadyDeleted_404(t *testing.T) {
 	}
 }
 
-// Scenario: Application Credential non supprimable (403) → warning, retour nil
+// Scenario: Application Credential cannot be deleted (403) → warning, return nil
 func TestDeleteAppCredential_Forbidden_403(t *testing.T) {
 	srv := newIdentityTestServer(t)
 	srv.deleteStatus = http.StatusForbidden
@@ -1844,7 +1844,7 @@ func TestDeleteAppCredential_Forbidden_403(t *testing.T) {
 	}
 }
 
-// Scenario: Erreur HTTP 500 → erreur propagée
+// Scenario: HTTP 500 error → error propagated
 func TestDeleteAppCredential_HTTP500_PropagatesError(t *testing.T) {
 	srv := newIdentityTestServer(t)
 	srv.deleteStatus = http.StatusInternalServerError
@@ -1856,7 +1856,7 @@ func TestDeleteAppCredential_HTTP500_PropagatesError(t *testing.T) {
 	}
 }
 
-// Scenario: Pas d'endpoint "identity" dans le catalogue → CatalogError
+// Scenario: No "identity" endpoint in catalog → CatalogError
 func TestDeleteAppCredential_NoIdentityEndpoint_ReturnsCatalogError(t *testing.T) {
 	ks := newKeystoneServer(t)
 	ks.catalog = catalogWith(
@@ -1882,7 +1882,7 @@ func TestDeleteAppCredential_NoIdentityEndpoint_ReturnsCatalogError(t *testing.T
 	}
 }
 
-// Scenario: Aucun snapshot correspondant → pas de suppression, pas de vérification
+// Scenario: No matching snapshot → no deletion, no verification
 func TestDeleteSnapshots_NothingToDelete_NoVerification(t *testing.T) {
 	srv := newSnapshotTestServer(t)
 	srv.snapshotLists = [][]cinderVolumeRecord{{}}
