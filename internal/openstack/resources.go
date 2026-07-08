@@ -279,7 +279,7 @@ func (s *Session) DeleteAppCredential(ctx context.Context, logger logr.Logger, c
 }
 
 func (s *Session) cinderEndpoint() (string, error) {
-	return s.endpointFor("volumev3", "block-storage")
+	return s.endpointFor("volumev3", "block-storage", "volume")
 }
 
 func (s *Session) listVolumeItems(ctx context.Context, endpoint, key string) ([]volumeItem, error) {

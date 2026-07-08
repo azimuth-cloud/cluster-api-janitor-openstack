@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"time"
 	"strings"
 
 	"sigs.k8s.io/yaml"
@@ -124,7 +125,10 @@ func Authenticate(ctx context.Context, cloudsYAML, cloudName, cacert string) (*S
 			return nil, err
 		}
 	}
-	hc := &http.Client{Transport: &http.Transport{TLSClientConfig: tlsCfg}}
+	hc := &http.Client{
+		Transport: &http.Transport{TLSClientConfig: tlsCfg},
+		Timeout:   30 * time.Second,
+	}
 
 	iface := entry.Interface
 	if iface == "" {
