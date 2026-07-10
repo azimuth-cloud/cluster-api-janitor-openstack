@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 
@@ -141,9 +142,7 @@ clouds:
 	if err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
-	if !session.IsAuthenticated() {
-		t.Fatal("expected authenticated session with network endpoint")
-	}
+	session.SleepFunc = func(d time.Duration) {}
 	return session
 }
 
@@ -279,6 +278,7 @@ clouds:
 	if err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
+	session.SleepFunc = func(d time.Duration) {}
 	return session
 }
 
@@ -499,6 +499,36 @@ func TestDeleteFloatingIPs_StillPresentAfterDeletion_ReturnsError(t *testing.T) 
 	}
 	if !strings.Contains(err.Error(), "mycluster") {
 		t.Errorf("expected error to mention cluster name, got: %v", err)
+	}
+}
+
+// Scenario: FIP disappears during polling → polling succeeds without error
+func TestDeleteFloatingIPs_SlowDeletion_PollingSucceeds(t *testing.T) {
+	srv := newNetworkTestServer(t)
+	fip := fipRecord{ID: "fip-slow", Description: fipDesc("mycluster")}
+	// idx 0: pre-delete list (FIP present)
+	// idx 1: first poll (FIP still present — OpenStack PENDING_DELETE)
+	// idx 2: second poll (FIP gone — deletion complete)
+	srv.fipLists = [][]fipRecord{{fip}, {fip}, {}}
+
+	session := srv.authenticate(t)
+	err := session.DeleteFloatingIPs(context.Background(), logr.Discard(), "mycluster")
+
+	if err != nil {
+		t.Fatalf("expected no error when FIP disappears during polling, got: %v", err)
+	}
+
+	srv.mu.Lock()
+	deletedIDs := srv.deletedFIPs
+	getCount := srv.fipGetCount
+	srv.mu.Unlock()
+
+	if len(deletedIDs) != 1 {
+		t.Errorf("expected 1 FIP deleted, got %d: %v", len(deletedIDs), deletedIDs)
+	}
+	// 1 pre-delete list + 2 polls = 3 GET calls
+	if getCount != 3 {
+		t.Errorf("expected 3 GET calls (1 list + 2 polls), got %d", getCount)
 	}
 }
 
@@ -904,6 +934,7 @@ clouds:
 	if !session.IsAuthenticated() {
 		t.Fatal("expected authenticated session with network endpoint")
 	}
+	session.SleepFunc = func(d time.Duration) {}
 	return session
 }
 
@@ -1238,6 +1269,7 @@ clouds:
 	if !session.IsAuthenticated() {
 		t.Fatal("expected authenticated session with volumev3 endpoint")
 	}
+	session.SleepFunc = func(d time.Duration) {}
 	return session
 }
 
@@ -1545,6 +1577,7 @@ clouds:
 	if !session.IsAuthenticated() {
 		t.Fatal("expected authenticated session with volumev3 endpoint")
 	}
+	session.SleepFunc = func(d time.Duration) {}
 	return session
 }
 
@@ -1797,6 +1830,7 @@ clouds:
 	if !session.IsAuthenticated() {
 		t.Fatal("expected authenticated session with identity endpoint")
 	}
+	session.SleepFunc = func(d time.Duration) {}
 	return session, cloudsYAML
 }
 

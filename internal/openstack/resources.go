@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/go-logr/logr"
 )
@@ -46,14 +47,14 @@ func (s *Session) DeleteFloatingIPs(ctx context.Context, logger logr.Logger, clu
 		}
 	}
 	if deleted {
-		remaining, err := listPages[fip](ctx, s, networkURL+"/v2.0/floatingips", "floatingips")
-		if err != nil {
-			return err
+		listFIPs := func() ([]fip, error) {
+			return listPages[fip](ctx, s, networkURL+"/v2.0/floatingips", "floatingips")
 		}
-		for _, f := range remaining {
-			if strings.HasPrefix(f.Description, prefix) && strings.HasSuffix(f.Description, suffix) {
-				return fmt.Errorf("floating IPs still present for cluster %s", cluster)
-			}
+		matchFIP := func(f fip) bool {
+			return strings.HasPrefix(f.Description, prefix) && strings.HasSuffix(f.Description, suffix)
+		}
+		if err := waitForDeletion(ctx, s, logger, listFIPs, matchFIP, "floating IPs for cluster "+cluster); err != nil {
+			return err
 		}
 	}
 	logger.Info("deleted floating IPs for LoadBalancer services")
@@ -95,15 +96,15 @@ func (s *Session) DeleteLoadBalancers(ctx context.Context, logger logr.Logger, c
 		}
 	}
 	if deleted {
-		remaining, err := listPages[lb](ctx, s, lbURL+"/v2/lbaas/loadbalancers", "loadbalancers")
-		if err != nil {
-			logger.Error(err, "failed to verify LB deletion")
-			return nil
+		listLBs := func() ([]lb, error) {
+			return listPages[lb](ctx, s, lbURL+"/v2/lbaas/loadbalancers", "loadbalancers")
 		}
-		for _, l := range remaining {
-			if strings.HasPrefix(l.Name, kubePrefix) {
-				return fmt.Errorf("load balancers still present for cluster %s", cluster)
-			}
+		matchLB := func(l lb) bool {
+			return strings.HasPrefix(l.Name, kubePrefix)
+		}
+		if err := waitForDeletion(ctx, s, logger, listLBs, matchLB, "load balancers for cluster "+cluster); err != nil {
+			logger.Error(err, "failed to verify LB deletion after polling")
+			return err
 		}
 	}
 	logger.Info("deleted load balancers for LoadBalancer services")
@@ -142,14 +143,14 @@ func (s *Session) DeleteSecurityGroups(ctx context.Context, logger logr.Logger, 
 		}
 	}
 	if deleted {
-		remaining, err := listPages[sg](ctx, s, networkURL+"/v2.0/security-groups", "security_groups")
-		if err != nil {
-			return err
+		listSGs := func() ([]sg, error) {
+			return listPages[sg](ctx, s, networkURL+"/v2.0/security-groups", "security_groups")
 		}
-		for _, g := range remaining {
-			if strings.HasPrefix(g.Description, "Security Group for") && strings.HasSuffix(g.Description, sgSuffix) {
-				return fmt.Errorf("security groups still present for cluster %s", cluster)
-			}
+		matchSG := func(g sg) bool {
+			return strings.HasPrefix(g.Description, "Security Group for") && strings.HasSuffix(g.Description, sgSuffix)
+		}
+		if err := waitForDeletion(ctx, s, logger, listSGs, matchSG, "security groups for cluster "+cluster); err != nil {
+			return err
 		}
 	}
 	logger.Info("deleted security groups for LoadBalancer services")
@@ -187,14 +188,14 @@ func (s *Session) DeleteSnapshots(ctx context.Context, logger logr.Logger, clust
 		}
 	}
 	if deleted {
-		remaining, err := s.listVolumeItems(ctx, cinderURL+"/snapshots/detail", "snapshots")
-		if err != nil {
-			return err
+		listSnaps := func() ([]volumeItem, error) {
+			return s.listVolumeItems(ctx, cinderURL+"/snapshots/detail", "snapshots")
 		}
-		for _, snap := range remaining {
-			if snap.Metadata["cinder.csi.openstack.org/cluster"] == cluster {
-				return fmt.Errorf("snapshots still present for cluster %s", cluster)
-			}
+		matchSnap := func(snap volumeItem) bool {
+			return snap.Metadata["cinder.csi.openstack.org/cluster"] == cluster
+		}
+		if err := waitForDeletion(ctx, s, logger, listSnaps, matchSnap, "snapshots for cluster "+cluster); err != nil {
+			return err
 		}
 	}
 	logger.Info("deleted snapshots for persistent volume claims")
@@ -231,15 +232,15 @@ func (s *Session) DeleteVolumes(ctx context.Context, logger logr.Logger, cluster
 		}
 	}
 	if deleted {
-		remaining, err := s.listVolumeItems(ctx, cinderURL+"/volumes/detail", "volumes")
-		if err != nil {
-			return err
+		listVols := func() ([]volumeItem, error) {
+			return s.listVolumeItems(ctx, cinderURL+"/volumes/detail", "volumes")
 		}
-		for _, vol := range remaining {
-			if vol.Metadata["cinder.csi.openstack.org/cluster"] == cluster &&
-				vol.Metadata[KeepProperty] != "true" {
-				return fmt.Errorf("volumes still present for cluster %s", cluster)
-			}
+		matchVol := func(vol volumeItem) bool {
+			return vol.Metadata["cinder.csi.openstack.org/cluster"] == cluster &&
+				vol.Metadata[KeepProperty] != "true"
+		}
+		if err := waitForDeletion(ctx, s, logger, listVols, matchVol, "volumes for cluster "+cluster); err != nil {
+			return err
 		}
 	}
 	logger.Info("deleted volumes for persistent volume claims")
@@ -310,6 +311,35 @@ func newDeleteRequest(ctx context.Context, target, token string) (*http.Request,
 	}
 	req.Header.Set("X-Auth-Token", token)
 	return req, nil
+}
+
+// waitForDeletion polls a list function until no items match the predicate,
+// or the maximum number of attempts is exceeded. This avoids failing
+// immediately when OpenStack has accepted a DELETE but the resource has
+// not yet been removed from list results.
+func waitForDeletion[T any](ctx context.Context, s *Session, logger logr.Logger, listFunc func() ([]T, error), matchFunc func(T) bool, desc string) error {
+	const (
+		maxPollAttempts = 6
+		pollInterval    = 5 * time.Second
+	)
+	for attempt := 0; attempt < maxPollAttempts; attempt++ {
+		s.sleep(pollInterval)
+		items, err := listFunc()
+		if err != nil {
+			return err
+		}
+		remaining := 0
+		for _, item := range items {
+			if matchFunc(item) {
+				remaining++
+			}
+		}
+		if remaining == 0 {
+			return nil
+		}
+		logger.Info(desc+" still present, retrying", "remaining", remaining, "attempt", attempt+1, "maxAttempts", maxPollAttempts)
+	}
+	return fmt.Errorf("%s still present", desc)
 }
 
 // listPages fetches all pages of a paginated OpenStack list endpoint and

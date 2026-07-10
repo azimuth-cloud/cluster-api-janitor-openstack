@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 
@@ -122,6 +123,7 @@ clouds:
 	if !session.IsAuthenticated() {
 		t.Fatal("expected authenticated session")
 	}
+	session.SleepFunc = func(d time.Duration) {}
 	return session
 }
 

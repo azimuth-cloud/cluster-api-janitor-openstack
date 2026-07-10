@@ -108,6 +108,18 @@ type Session struct {
 	endpoints     map[string]string
 	httpClient    *http.Client
 	authenticated bool
+	// SleepFunc is called instead of time.Sleep for polling waits.
+	// A nil value defaults to time.Sleep.
+	SleepFunc func(time.Duration)
+}
+
+// sleep calls SleepFunc if set, otherwise time.Sleep.
+func (s *Session) sleep(d time.Duration) {
+	if s.SleepFunc != nil {
+		s.SleepFunc(d)
+	} else {
+		time.Sleep(d)
+	}
 }
 
 // IsAuthenticated reports whether the session has a valid token and catalog.
