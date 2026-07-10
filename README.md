@@ -156,15 +156,6 @@ make build         # go build ./cmd/main.go
 
 ## Building the OCI image
 
-### Docker (local development)
-
-```sh
-docker build -t cluster-api-janitor-openstack:dev .
-```
-
-The Dockerfile uses a multi-stage build: `golang:1.26` builder →
-`gcr.io/distroless/static:nonroot` runtime (UID 65532, read-only root FS).
-
 ### Nix (reproducible, multi-arch + SBOM)
 
 CI uses `nix-build` for reproducible builds. The `tests` derivation runs

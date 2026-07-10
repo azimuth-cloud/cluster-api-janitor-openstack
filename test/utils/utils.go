@@ -133,13 +133,15 @@ func IsCertManagerCRDsInstalled() bool {
 	return false
 }
 
-// LoadImageToKindClusterWithName loads a local docker image to the kind cluster
-func LoadImageToKindClusterWithName(name string) error {
+// LoadImageArchiveToKindClusterWithName loads an OCI image archive, as
+// produced by `nix-build nix -A image`, into the kind cluster. Unlike
+// `kind load docker-image`, this does not require a local Docker daemon.
+func LoadImageArchiveToKindClusterWithName(archivePath string) error {
 	cluster := defaultKindCluster
 	if v, ok := os.LookupEnv("KIND_CLUSTER"); ok {
 		cluster = v
 	}
-	kindOptions := []string{"load", "docker-image", name, "--name", cluster}
+	kindOptions := []string{"load", "image-archive", archivePath, "--name", cluster}
 	kindBinary := defaultKindBinary
 	if v, ok := os.LookupEnv("KIND"); ok {
 		kindBinary = v

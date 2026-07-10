@@ -158,7 +158,8 @@ make manifests generate
 
 # 2. Build & deploy
 export IMG=<registry>/<project>:tag
-make docker-build docker-push IMG=$IMG  # Or: kind load docker-image $IMG --name <cluster>
+nix-build nix -A image -o image.tar.gz  # produces an OCI archive, see nix/default.nix
+skopeo copy docker-archive:image.tar.gz "docker://$IMG"  # or: kind load image-archive image.tar.gz --name <cluster>
 make deploy IMG=$IMG
 
 # 3. Test
@@ -298,7 +299,8 @@ helm install my-release ./<output-dir>/chart/ --namespace <ns> --create-namespac
 
 ```bash
 export IMG=<registry>/<project>:<version>
-make docker-build docker-push IMG=$IMG
+nix-build nix -A image -o image.tar.gz  # see nix/default.nix
+skopeo copy docker-archive:image.tar.gz "docker://$IMG"
 ```
 
 ## References

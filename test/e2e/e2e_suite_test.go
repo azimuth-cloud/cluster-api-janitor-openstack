@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"testing"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -33,7 +34,8 @@ import (
 
 var (
 	// managerImage is the manager image to be built and loaded for testing.
-	managerImage = "example.com/cluster-api-janitor-openstack:v0.0.1"
+	// Must match the name/tag hardcoded in nix/default.nix's `image` derivation.
+	managerImage = "ghcr.io/azimuth-cloud/cluster-api-janitor-openstack:latest"
 	// shouldCleanupCertManager tracks whether CertManager was installed by this suite.
 	shouldCleanupCertManager = false
 )
@@ -51,15 +53,16 @@ func TestE2E(t *testing.T) {
 }
 
 var _ = BeforeSuite(func() {
-	By("building the manager image")
-	cmd := exec.Command("make", "docker-build", fmt.Sprintf("IMG=%s", managerImage))
+	By("building the manager image (Nix)")
+	imageArchive := filepath.Join(os.TempDir(), "cluster-api-janitor-openstack-e2e-image.tar.gz")
+	cmd := exec.Command("nix-build", "nix", "-A", "image", "-o", imageArchive)
 	_, err := utils.Run(cmd)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build the manager image")
 
 	// TODO(user): If you want to change the e2e test vendor from Kind,
 	// ensure the image is built and available, then remove the following block.
 	By("loading the manager image on Kind")
-	err = utils.LoadImageToKindClusterWithName(managerImage)
+	err = utils.LoadImageArchiveToKindClusterWithName(imageArchive)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to load the manager image into Kind")
 
 	configureKubectlKubeRC()

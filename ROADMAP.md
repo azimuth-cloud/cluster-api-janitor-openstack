@@ -545,15 +545,15 @@ Feature: Configuration via Environment Variables
 
 ### Epic 10 — Packaging and Deployment
 
-#### US10.1 — Secure Image (Go Dockerfile)
+#### US10.1 — Secure Image (Nix Build)
 
 ```gherkin
 Feature: Secure OCI Image for the Go Operator
-  Scenario: Multi-stage Go build
+  Scenario: Reproducible Nix build
     Given the Go operator source code
-    When the Dockerfile is built
-    Then the builder uses golang:1.26
-    And the runtime uses gcr.io/distroless/static:nonroot (UID 65532)
+    When `nix-build nix -A image` is run
+    Then the manager binary is built with buildGoModule and CGO_ENABLED=0
+    And the image contains only the Nix closure required to run the binary
 
   Scenario: Image security
     Given the built image
@@ -718,7 +718,7 @@ Feature: Cinder Service Detection with Aliases
 | Controller | `internal/controller/openstackcluster_controller.go`, `metrics.go` |
 | Config | `internal/controller/config.go` (env vars) |
 | Tests | 108 tests (4 packages) |
-| Packaging | `Dockerfile`, `nix/default.nix`, `nix/nixpkgs.nix` |
+| Packaging | `nix/default.nix`, `nix/nixpkgs.nix` |
 | Helm | `chart/` — Deployment, ClusterRole, RBAC, health probes |
 | CI | `.github/workflows/build-push-artifacts.yaml` (Nix + skopeo + SBOM) |
 

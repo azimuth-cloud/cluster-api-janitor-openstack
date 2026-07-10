@@ -18,18 +18,18 @@ updates:
       - dependency-name: "actions/*"
       - dependency-name: "github-actions/*"
 
-  # Automatically propose PRs for Python dependencies
-  - package-ecosystem: pip
+  # Automatically propose PRs for Go module dependencies
+  - package-ecosystem: gomod
     directory: "/"
     schedule:
-      # Check for new versions daily
-      interval: daily
+      # Check for new versions weekly
+      interval: weekly
     groups:
-      pip-updates:
+      go-updates:
         patterns: ["*"]
     labels:
       - automation
-      - pip-update
+      - go-update
     commit-message:
-      # Prefix all commit messages with "pip: "
-      prefix: "pip"
+      # Prefix all commit messages with "go: "
+      prefix: "go"
