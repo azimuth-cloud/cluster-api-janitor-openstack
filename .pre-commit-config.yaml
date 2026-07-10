@@ -1,0 +1,46 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+        # config/ contains kubebuilder-scaffolded multi-document manifests
+        # (e.g. config/manager/manager.yaml: Namespace + Deployment).
+        args: [--allow-multiple-documents]
+        exclude: ^chart/templates/
+      - id: check-added-large-files
+      - id: check-merge-conflict
+
+  - repo: local
+    hooks:
+      - id: go-fmt
+        name: go fmt
+        description: Fail if any Go file is not gofmt-formatted (mirrors nix -A tests).
+        entry: bash -c 'out=$(gofmt -l "$@"); if [ -n "$out" ]; then echo "$out"; exit 1; fi' --
+        language: system
+        types: [go]
+
+      - id: go-vet
+        name: go vet
+        description: Run go vet ./... (mirrors nix -A tests / make vet).
+        entry: bash -c 'go vet ./...'
+        language: system
+        types: [go]
+        pass_filenames: false
+
+      - id: go-test
+        name: go test
+        description: Run the unit test suite, excluding e2e (mirrors nix -A tests / make test).
+        entry: bash -c 'go test $(go list ./... | grep -v /test/e2e)'
+        language: system
+        types: [go]
+        pass_filenames: false
+
+      - id: helm-lint
+        name: helm lint chart
+        description: Lint the Helm chart (mirrors the CI helm-lint workflow).
+        entry: helm lint chart --strict
+        language: system
+        files: ^chart/
+        pass_filenames: false

@@ -32,4 +32,3 @@
 
   "onCreateCommand": "bash .devcontainer/post-install.sh"
 }
-

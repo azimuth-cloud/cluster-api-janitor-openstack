@@ -1,6 +1,5 @@
 version: 2
 updates:
-updates:
   # Using dependabot for all GHA violates pinning policy
   - package-ecosystem: github-actions
     directory: "/"

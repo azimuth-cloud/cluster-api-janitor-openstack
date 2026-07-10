@@ -10,3 +10,4 @@ chart/Chart.lock
 # Nix
 result
 result-*
+*.tar.gz
