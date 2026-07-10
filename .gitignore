@@ -10,4 +10,5 @@ chart/Chart.lock
 # Nix
 result
 result-*
+sbom.cdx.json
 *.tar.gz
