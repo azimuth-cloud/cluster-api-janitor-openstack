@@ -3,6 +3,7 @@ package openstack
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -103,8 +104,11 @@ func (s *Session) DeleteLoadBalancers(ctx context.Context, logger logr.Logger, c
 			return strings.HasPrefix(l.Name, kubePrefix)
 		}
 		if err := waitForDeletion(ctx, s, logger, listLBs, matchLB, "load balancers for cluster "+cluster); err != nil {
+			var stillPresent *stillPresentError
+			if errors.As(err, &stillPresent) {
+				return err
+			}
 			logger.Error(err, "failed to verify LB deletion after polling")
-			return err
 		}
 	}
 	logger.Info("deleted load balancers for LoadBalancer services")
@@ -313,6 +317,14 @@ func newDeleteRequest(ctx context.Context, target, token string) (*http.Request,
 	return req, nil
 }
 
+// stillPresentError indicates that a resource was still present after
+// waitForDeletion exhausted its polling attempts, as opposed to an error
+// from the underlying listFunc itself. Callers use errors.As to tell the two
+// apart, since some resource types treat listing failures as non-fatal.
+type stillPresentError struct{ desc string }
+
+func (e *stillPresentError) Error() string { return e.desc + " still present" }
+
 // waitForDeletion polls a list function until no items match the predicate,
 // or the maximum number of attempts is exceeded. This avoids failing
 // immediately when OpenStack has accepted a DELETE but the resource has
@@ -323,7 +335,14 @@ func waitForDeletion[T any](ctx context.Context, s *Session, logger logr.Logger,
 		pollInterval    = 5 * time.Second
 	)
 	for attempt := 0; attempt < maxPollAttempts; attempt++ {
-		s.sleep(pollInterval)
+		if attempt > 0 {
+			s.sleep(pollInterval)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
 		items, err := listFunc()
 		if err != nil {
 			return err
@@ -339,7 +358,7 @@ func waitForDeletion[T any](ctx context.Context, s *Session, logger logr.Logger,
 		}
 		logger.Info(desc+" still present, retrying", "remaining", remaining, "attempt", attempt+1, "maxAttempts", maxPollAttempts)
 	}
-	return fmt.Errorf("%s still present", desc)
+	return &stillPresentError{desc: desc}
 }
 
 // listPages fetches all pages of a paginated OpenStack list endpoint and

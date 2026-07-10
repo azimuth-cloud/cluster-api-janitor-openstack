@@ -210,7 +210,25 @@ Feature: Floating IP Deletion
     Given a FIP deletion returns HTTP 500
     When the purge attempts to delete the FIP
     Then an exception is propagated
+
+  Scenario: FIP deletion confirmed via polling
+    Given a FIP still appears in a first verification listing (OpenStack PENDING_DELETE)
+    When the purge polls again shortly after
+    And the FIP has disappeared
+    Then no error is raised
+
+  Scenario: FIP still present after exhausting verification attempts
+    Given a FIP still appears in every verification listing
+    When the purge exhausts its polling attempts
+    Then an error is returned mentioning the cluster name
 ```
+
+> Deletion verification for FIPs, LBs, security groups, volumes and snapshots
+> (Epics 2 to 6) shares a common polling mechanism: verify immediately after
+> issuing the deletes, then retry a bounded number of times with a fixed
+> delay between attempts if the resource is still listed. This absorbs
+> OpenStack's eventual consistency (`PENDING_DELETE` states) without
+> incurring a wait when nothing needs one.
 
 ---
 
@@ -251,7 +269,19 @@ Feature: Identifying Azimuth Load Balancers
     Then an ERROR log is emitted with the HTTP code
     And no exception is propagated
     And a warning indicates that LBs may remain
+
+  Scenario: HTTP error while verifying LB deletion after polling
+    Given LBs were deleted for cluster "mycluster"
+    And the Octavia API returns an HTTP error while verifying their deletion
+    When the verification polling exhausts its attempts due to the error
+    Then an ERROR log is emitted
+    And no exception is propagated
 ```
+
+> Unlike the other resource types, LB verification failures stay non-fatal
+> (logged only) in both cases above — before and after the deletes are
+> issued — since Octavia listing is known to be slower/less reliable than
+> Neutron or Cinder (see PR #261).
 
 #### US3.3 — Delete Load Balancers with Cascade
 

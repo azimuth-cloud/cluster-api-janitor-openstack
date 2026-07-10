@@ -3,6 +3,7 @@ package openstack_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -142,6 +143,9 @@ clouds:
 	if err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
+	if !session.IsAuthenticated() {
+		t.Fatal("expected authenticated session with network endpoint")
+	}
 	session.SleepFunc = func(d time.Duration) {}
 	return session
 }
@@ -166,7 +170,8 @@ type lbTestServer struct {
 	mu                 sync.Mutex
 	lbLists            [][]lbRecord
 	lbGetCount         int
-	listStatusOverride int // if non-zero, all GET /v2/lbaas/loadbalancers return this status
+	listStatusOverride int // if non-zero, GET /v2/lbaas/loadbalancers returns this status
+	listFailFrom       int // 1-based GET call number from which listStatusOverride applies; 0 = from the first call
 	deleteStatus       map[string]int
 	deletedLBs         []string
 	deleteCascade      []string // cascade query param value per DELETE call
@@ -219,8 +224,10 @@ func newLBTestServer(t *testing.T) *lbTestServer {
 		}
 		srv.mu.Lock()
 		override := srv.listStatusOverride
+		failFrom := srv.listFailFrom
 		srv.lbGetCount++
-		idx := srv.lbGetCount - 1
+		callNum := srv.lbGetCount
+		idx := callNum - 1
 		var list []lbRecord
 		if len(srv.lbLists) > 0 {
 			if idx < len(srv.lbLists) {
@@ -230,7 +237,7 @@ func newLBTestServer(t *testing.T) *lbTestServer {
 			}
 		}
 		srv.mu.Unlock()
-		if override != 0 {
+		if override != 0 && (failFrom == 0 || callNum >= failFrom) {
 			w.WriteHeader(override)
 			return
 		}
@@ -277,6 +284,9 @@ clouds:
 	session, err := openstack.Authenticate(context.Background(), cloudsYAML, "openstack", "")
 	if err != nil {
 		t.Fatalf("authenticate: %v", err)
+	}
+	if !session.IsAuthenticated() {
+		t.Fatal("expected authenticated session with load-balancer endpoint")
 	}
 	session.SleepFunc = func(d time.Duration) {}
 	return session
@@ -502,6 +512,33 @@ func TestDeleteFloatingIPs_StillPresentAfterDeletion_ReturnsError(t *testing.T) 
 	}
 }
 
+// Scenario: context is canceled while polling → polling stops immediately,
+// without an extra wasted list round-trip
+func TestDeleteFloatingIPs_ContextCanceledDuringPolling_StopsImmediately(t *testing.T) {
+	srv := newNetworkTestServer(t)
+	fip := fipRecord{ID: "fip-persistent", Description: fipDesc("mycluster")}
+	srv.fipLists = [][]fipRecord{{fip}, {fip}, {fip}, {fip}} // always present
+
+	session := srv.authenticate(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	session.SleepFunc = func(d time.Duration) { cancel() }
+
+	err := session.DeleteFloatingIPs(ctx, logr.Discard(), "mycluster")
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got: %v", err)
+	}
+	srv.mu.Lock()
+	getCount := srv.fipGetCount
+	srv.mu.Unlock()
+	// 1 pre-delete list + 1 poll (attempt 0, before any sleep) = 2 GET calls.
+	// The sleep before attempt 1 cancels the context, so attempt 1's list call
+	// must never happen.
+	if getCount != 2 {
+		t.Errorf("expected exactly 2 GET calls (no wasted round-trip after cancellation), got %d", getCount)
+	}
+}
+
 // Scenario: FIP disappears during polling → polling succeeds without error
 func TestDeleteFloatingIPs_SlowDeletion_PollingSucceeds(t *testing.T) {
 	srv := newNetworkTestServer(t)
@@ -529,6 +566,25 @@ func TestDeleteFloatingIPs_SlowDeletion_PollingSucceeds(t *testing.T) {
 	// 1 pre-delete list + 2 polls = 3 GET calls
 	if getCount != 3 {
 		t.Errorf("expected 3 GET calls (1 list + 2 polls), got %d", getCount)
+	}
+}
+
+// Scenario: FIP already gone on the first verification check → no wait incurred
+func TestDeleteFloatingIPs_ImmediateVerification_NoSleep(t *testing.T) {
+	srv := newNetworkTestServer(t)
+	fip := fipRecord{ID: "fip-fast", Description: fipDesc("mycluster")}
+	srv.fipLists = [][]fipRecord{{fip}, {}} // gone by the first verification check
+
+	session := srv.authenticate(t)
+	var sleepCalls int
+	session.SleepFunc = func(d time.Duration) { sleepCalls++ }
+	err := session.DeleteFloatingIPs(context.Background(), logr.Discard(), "mycluster")
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if sleepCalls != 0 {
+		t.Errorf("expected no sleep when the resource is already gone, got %d sleep calls", sleepCalls)
 	}
 }
 
@@ -657,6 +713,30 @@ func TestDeleteLoadBalancers_ListError_LogsAndSkips(t *testing.T) {
 	srv.mu.Unlock()
 	if deleted != 0 {
 		t.Errorf("expected no DELETE calls when list fails, got %d", deleted)
+	}
+}
+
+// Scenario: HTTP error while verifying LB deletion after polling → ERROR log, no exception
+// (unlike other resource types, LB verification failures are non-fatal: Octavia
+// listing is known to be slower/less reliable, see PR #261.)
+func TestDeleteLoadBalancers_VerificationListError_LogsAndSucceeds(t *testing.T) {
+	srv := newLBTestServer(t)
+	lb := lbRecord{ID: "lb-001", Name: lbKubeName("mycluster", "svc")}
+	srv.lbLists = [][]lbRecord{{lb}}
+	srv.listStatusOverride = http.StatusInternalServerError
+	srv.listFailFrom = 2 // pre-delete list (call 1) succeeds; verification (call 2+) fails
+
+	session := srv.authenticate(t)
+	err := session.DeleteLoadBalancers(context.Background(), logr.Discard(), "mycluster")
+
+	if err != nil {
+		t.Fatalf("expected nil when verification list fails after deletion, got: %v", err)
+	}
+	srv.mu.Lock()
+	deleted := len(srv.deletedLBs)
+	srv.mu.Unlock()
+	if deleted != 1 {
+		t.Errorf("expected the LB delete to have been attempted, got %d DELETE calls", deleted)
 	}
 }
 
