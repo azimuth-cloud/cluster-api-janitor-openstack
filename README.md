@@ -140,7 +140,6 @@ required.
 ```sh
 go fmt ./...
 go vet ./...
-golangci-lint run ./...    # config in .golangci.yml
 ```
 
 ### Makefile targets
@@ -151,7 +150,7 @@ make generate      # regenerate DeepCopy methods
 make manifests     # regenerate CRD/RBAC YAML
 make fmt           # go fmt
 make vet           # go vet
-make test          # go test with race detector
+make test          # go test (excludes e2e)
 make build         # go build ./cmd/main.go
 ```
 
@@ -168,22 +167,38 @@ The Dockerfile uses a multi-stage build: `golang:1.26` builder →
 
 ### Nix (reproducible, multi-arch + SBOM)
 
-CI uses `nix-build` for reproducible images and SBOM generation:
+CI uses `nix-build` for reproducible builds. The `tests` derivation runs
+`go fmt`, `go vet`, and the full unit-test suite inside the Nix sandbox — no
+external toolchain needed:
 
 ```sh
+# CI check: go fmt + go vet + 108 unit tests
+nix-build nix -A tests
+
+# Build the manager binary only
+nix-build nix -A manager
+
 # Build the amd64 OCI image
 nix-build nix -A image
 
-# Build the arm64 OCI image (cross-compiled)
+# Build the arm64 OCI image (cross-compiled from amd64)
 nix-build nix -A image-arm64
 
 # Generate the CycloneDX SBOM
-nix-build nix -A sbom && cat result | python3 -m json.tool | grep bomFormat
+nix-build nix -A sbom
 ```
 
-> `nix/nixpkgs.nix` pins `nixos-26.05` (required for Go 1.26).
-> On the first run, `nix-build nix -A manager` will fail with the real
-> `vendorHash` to substitute in `nix/default.nix`.
+> **`nix/nixpkgs.nix`** pins `nixos-26.05` (Go 1.26+).
+> **`vendorHash`** in `nix/default.nix` is set to `sha256-5p5z+fzRkBk6rIb3DWwA3jsF4MdMVAwKHz7xza09fCc=`
+> (run `nix-build nix -A manager` after any `go.mod` change — the build will
+> fail and print the new hash to substitute).
+
+**Binary linkage note**: on macOS the local build produces a darwin/arm64 Mach-O
+(dynamically linked against system libraries — normal for Go on Darwin). The
+arm64 image produced via `pkgsCross.aarch64-multiplatform` contains a Linux ELF
+dynamically linked against glibc; `buildLayeredImage` automatically includes the
+full Nix closure (glibc and its dependencies) so the image is self-contained and
+runs correctly in Kubernetes.
 
 ## Observability
 

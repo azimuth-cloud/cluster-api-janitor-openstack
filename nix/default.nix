@@ -7,10 +7,10 @@ let
     version = "0.0.0-dev";
     src = ../.;
     subPackages = [ "cmd" ];
-    CGO_ENABLED = "0";
+    env.CGO_ENABLED = "0";
     ldflags = [ "-s" "-w" ];
     # Run `nix-build nix -A manager` once; it will fail and print the real hash.
-    vendorHash = pkgs.lib.fakeHash;
+    vendorHash = "sha256-5p5z+fzRkBk6rIb3DWwA3jsF4MdMVAwKHz7xza09fCc=";
     postInstall = ''
       mv $out/bin/cmd $out/bin/manager
     '';
