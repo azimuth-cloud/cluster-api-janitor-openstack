@@ -28,13 +28,13 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	infrav1 "sigs.k8s.io/cluster-api-provider-openstack/api/v1beta1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
-	infrav1 "sigs.k8s.io/cluster-api-provider-openstack/api/v1beta1"
 
 	"github.com/azimuth-cloud/cluster-api-janitor-openstack/internal/controller"
 	// +kubebuilder:scaffold:imports

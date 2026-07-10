@@ -18,7 +18,7 @@ func (s *Session) DeleteFloatingIPs(ctx context.Context, logger logr.Logger, clu
 	if err != nil {
 		return err
 	}
-	prefix := "Floating IP for Kubernetes external service"
+	prefix := "Floating IP for Kubernetes"
 	suffix := "from cluster " + cluster
 
 	type fip struct {
@@ -255,6 +255,11 @@ func (s *Session) DeleteAppCredential(ctx context.Context, logger logr.Logger, c
 	appcredID, err := AppCredentialID(cloudsYAML, cloudName)
 	if err != nil {
 		return err
+	}
+	if appcredID == "" {
+		// Password (v3password) auth has no application credential to delete.
+		logger.Info("no application credential in use, skipping deletion")
+		return nil
 	}
 	target := strings.TrimRight(identityURL, "/") + "/v3/users/" + s.userID + "/application_credentials/" + appcredID
 	req, err := newDeleteRequest(ctx, target, s.token)

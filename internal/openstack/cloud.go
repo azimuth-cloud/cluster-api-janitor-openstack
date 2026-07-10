@@ -11,8 +11,8 @@ import (
 	"io"
 	"net/http"
 	"regexp"
-	"time"
 	"strings"
+	"time"
 
 	"sigs.k8s.io/yaml"
 )
@@ -20,6 +20,11 @@ import (
 const (
 	// KeepProperty is the OpenStack volume metadata key that marks a volume as user-kept.
 	KeepProperty = "janitor.capi.azimuth-cloud.com/keep"
+
+	// authTypeAppCred is the clouds.yaml auth_type for application credentials.
+	authTypeAppCred = "v3applicationcredential"
+	// authTypePassword is the clouds.yaml auth_type for username/password auth.
+	authTypePassword = "v3password"
 )
 
 // AuthenticationError is returned when OpenStack authentication fails.
@@ -65,6 +70,19 @@ type authBlock struct {
 	AuthURL                     string `yaml:"auth_url"                      json:"auth_url"`
 	ApplicationCredentialID     string `yaml:"application_credential_id"     json:"application_credential_id"`
 	ApplicationCredentialSecret string `yaml:"application_credential_secret" json:"application_credential_secret"`
+
+	// Username/password (v3password) fields.
+	Username          string `yaml:"username"            json:"username"`
+	UserID            string `yaml:"user_id"             json:"user_id"`
+	Password          string `yaml:"password"            json:"password"`
+	ProjectID         string `yaml:"project_id"          json:"project_id"`
+	ProjectName       string `yaml:"project_name"        json:"project_name"`
+	UserDomainName    string `yaml:"user_domain_name"    json:"user_domain_name"`
+	UserDomainID      string `yaml:"user_domain_id"      json:"user_domain_id"`
+	ProjectDomainName string `yaml:"project_domain_name" json:"project_domain_name"`
+	ProjectDomainID   string `yaml:"project_domain_id"   json:"project_domain_id"`
+	DomainName        string `yaml:"domain_name"         json:"domain_name"`
+	DomainID          string `yaml:"domain_id"           json:"domain_id"`
 }
 
 // parseCloudsYAML parses a clouds.yaml string into a cloudsFile.
@@ -115,8 +133,9 @@ func Authenticate(ctx context.Context, cloudsYAML, cloudName, cacert string) (*S
 	if !ok {
 		return nil, fmt.Errorf("cloud %q not found in clouds.yaml", cloudName)
 	}
-	if entry.AuthType != "v3applicationcredential" {
-		return nil, &UnsupportedAuthTypeError{AuthType: entry.AuthType}
+	authType, err := resolveAuthType(entry)
+	if err != nil {
+		return nil, err
 	}
 
 	tlsCfg := &tls.Config{} //nolint:gosec
@@ -137,7 +156,7 @@ func Authenticate(ctx context.Context, cloudsYAML, cloudName, cacert string) (*S
 	baseURL := authURLBase(entry.Auth.AuthURL)
 
 	s := &Session{httpClient: hc}
-	if err := s.getToken(ctx, baseURL, entry.Auth); err != nil {
+	if err := s.getToken(ctx, baseURL, authType, entry.Auth); err != nil {
 		if isHTTP(err, http.StatusNotFound) {
 			return s, nil // deleted appcred case: unauthenticated, no fatal error
 		}
@@ -149,8 +168,95 @@ func Authenticate(ctx context.Context, cloudsYAML, cloudName, cacert string) (*S
 	return s, nil
 }
 
-func (s *Session) getToken(ctx context.Context, baseURL string, auth authBlock) error {
-	body, _ := json.Marshal(map[string]any{
+// resolveAuthType determines the effective auth type for a cloud entry.
+// It honours an explicit auth_type, and otherwise infers it from the auth
+// block (application credential fields imply v3applicationcredential, a
+// username/user_id implies v3password) to match common clouds.yaml usage
+// where auth_type is omitted.
+func resolveAuthType(entry cloudEntry) (string, error) {
+	switch entry.AuthType {
+	case authTypeAppCred, authTypePassword:
+		return entry.AuthType, nil
+	case "", "password":
+		// Infer from the auth block for empty or ambiguous "password" values.
+		if entry.Auth.ApplicationCredentialID != "" || entry.Auth.ApplicationCredentialSecret != "" {
+			return authTypeAppCred, nil
+		}
+		if entry.Auth.Username != "" || entry.Auth.UserID != "" {
+			return authTypePassword, nil
+		}
+		return "", &UnsupportedAuthTypeError{AuthType: entry.AuthType}
+	default:
+		return "", &UnsupportedAuthTypeError{AuthType: entry.AuthType}
+	}
+}
+
+// passwordScope builds the Keystone auth scope from the auth block, preferring
+// project scoping and falling back to domain scoping when set.
+func passwordScope(auth authBlock) map[string]any {
+	if auth.ProjectID != "" || auth.ProjectName != "" {
+		project := map[string]any{}
+		if auth.ProjectID != "" {
+			project["id"] = auth.ProjectID
+		} else {
+			project["name"] = auth.ProjectName
+			domain := map[string]any{}
+			switch {
+			case auth.ProjectDomainID != "":
+				domain["id"] = auth.ProjectDomainID
+			case auth.ProjectDomainName != "":
+				domain["name"] = auth.ProjectDomainName
+			case auth.UserDomainID != "":
+				domain["id"] = auth.UserDomainID
+			case auth.UserDomainName != "":
+				domain["name"] = auth.UserDomainName
+			}
+			if len(domain) > 0 {
+				project["domain"] = domain
+			}
+		}
+		return map[string]any{"project": project}
+	}
+	if auth.DomainID != "" {
+		return map[string]any{"domain": map[string]any{"id": auth.DomainID}}
+	}
+	if auth.DomainName != "" {
+		return map[string]any{"domain": map[string]any{"name": auth.DomainName}}
+	}
+	return nil
+}
+
+// passwordTokenBody builds the Keystone token request body for v3password auth.
+func passwordTokenBody(auth authBlock) map[string]any {
+	user := map[string]any{"password": auth.Password}
+	if auth.UserID != "" {
+		user["id"] = auth.UserID
+	} else {
+		user["name"] = auth.Username
+		domain := map[string]any{}
+		if auth.UserDomainID != "" {
+			domain["id"] = auth.UserDomainID
+		} else if auth.UserDomainName != "" {
+			domain["name"] = auth.UserDomainName
+		}
+		if len(domain) > 0 {
+			user["domain"] = domain
+		}
+	}
+	identity := map[string]any{
+		"methods":  []string{"password"},
+		"password": map[string]any{"user": user},
+	}
+	authReq := map[string]any{"identity": identity}
+	if scope := passwordScope(auth); scope != nil {
+		authReq["scope"] = scope
+	}
+	return map[string]any{"auth": authReq}
+}
+
+// appCredTokenBody builds the Keystone token request body for application credential auth.
+func appCredTokenBody(auth authBlock) map[string]any {
+	return map[string]any{
 		"auth": map[string]any{
 			"identity": map[string]any{
 				"methods": []string{"application_credential"},
@@ -160,7 +266,17 @@ func (s *Session) getToken(ctx context.Context, baseURL string, auth authBlock) 
 				},
 			},
 		},
-	})
+	}
+}
+
+func (s *Session) getToken(ctx context.Context, baseURL, authType string, auth authBlock) error {
+	var payload map[string]any
+	if authType == authTypePassword {
+		payload = passwordTokenBody(auth)
+	} else {
+		payload = appCredTokenBody(auth)
+	}
+	body, _ := json.Marshal(payload)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		baseURL+"/v3/auth/tokens", strings.NewReader(string(body)))
 	if err != nil {
@@ -290,7 +406,7 @@ func (s *Session) doDelete(ctx context.Context, url string) error {
 
 type httpStatusError struct{ code int }
 
-func (e *httpStatusError) Error() string { return fmt.Sprintf("HTTP %d", e.code) }
+func (e *httpStatusError) Error() string   { return fmt.Sprintf("HTTP %d", e.code) }
 func (e *httpStatusError) StatusCode() int { return e.code }
 
 func isHTTP(err error, code int) bool {

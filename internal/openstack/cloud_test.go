@@ -21,6 +21,7 @@ type keystoneServer struct {
 	tokenUserID   string
 	catalogStatus int
 	catalog       map[string]any
+	lastTokenBody map[string]any
 }
 
 func newKeystoneServer(t *testing.T) *keystoneServer {
@@ -36,6 +37,10 @@ func newKeystoneServer(t *testing.T) *keystoneServer {
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
+		}
+		var reqBody map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&reqBody); err == nil {
+			ks.lastTokenBody = reqBody
 		}
 		if ks.tokenStatus >= 400 {
 			w.WriteHeader(ks.tokenStatus)
@@ -198,12 +203,12 @@ func TestAuthenticate_SuccessfulAuthentication(t *testing.T) {
 }
 
 // Scenario: Authentication with unsupported type
-// Given a clouds.yaml with auth_type "password"
+// Given a clouds.yaml with an unsupported auth_type "token"
 // When the operator attempts to create a Cloud client
 // Then an UnsupportedAuthTypeError is raised
 func TestAuthenticate_UnsupportedAuthType(t *testing.T) {
 	ks := newKeystoneServer(t)
-	clouds := buildCloudsYAML(ks.URL, "password")
+	clouds := buildCloudsYAML(ks.URL, "token")
 
 	_, err := openstack.Authenticate(context.Background(), clouds, "openstack", "")
 
@@ -214,8 +219,88 @@ func TestAuthenticate_UnsupportedAuthType(t *testing.T) {
 	if !errorAs(err, &target) {
 		t.Fatalf("expected *UnsupportedAuthTypeError, got %T: %v", err, err)
 	}
-	if target.AuthType != "password" {
-		t.Errorf("expected AuthType %q, got %q", "password", target.AuthType)
+	if target.AuthType != "token" {
+		t.Errorf("expected AuthType %q, got %q", "token", target.AuthType)
+	}
+}
+
+// ── Password (v3password) authentication ──────────────────────────────────
+
+func buildPasswordCloudsYAML(authURL, authType string) string {
+	return fmt.Sprintf(`
+clouds:
+  openstack:
+    auth_type: %s
+    auth:
+      auth_url: %s
+      username: alice
+      password: s3cret
+      project_id: proj-123
+      user_domain_name: Default
+    region_name: RegionOne
+    interface: public
+`, authType, authURL)
+}
+
+// Scenario: Successful authentication via username/password
+func TestAuthenticate_Password_Successful(t *testing.T) {
+	ks := newKeystoneServer(t)
+	ks.catalog = catalogWith(
+		serviceEntry("compute",
+			endpoint("public", "RegionOne", "http://compute.example.com"),
+		),
+	)
+
+	clouds := buildPasswordCloudsYAML(ks.URL, "v3password")
+	session, err := openstack.Authenticate(context.Background(), clouds, "openstack", "")
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if !session.IsAuthenticated() {
+		t.Error("expected session to be authenticated")
+	}
+
+	// Verify the request used the password method with a project scope.
+	auth, _ := ks.lastTokenBody["auth"].(map[string]any)
+	identity, _ := auth["identity"].(map[string]any)
+	methods, _ := identity["methods"].([]any)
+	if len(methods) != 1 || methods[0] != "password" {
+		t.Errorf("expected password method, got %v", methods)
+	}
+	pw, _ := identity["password"].(map[string]any)
+	user, _ := pw["user"].(map[string]any)
+	if user["name"] != "alice" || user["password"] != "s3cret" {
+		t.Errorf("unexpected user block: %v", user)
+	}
+	scope, _ := auth["scope"].(map[string]any)
+	project, _ := scope["project"].(map[string]any)
+	if project["id"] != "proj-123" {
+		t.Errorf("expected project id proj-123, got %v", project["id"])
+	}
+}
+
+// Scenario: auth_type omitted but username present is inferred as v3password
+func TestAuthenticate_Password_InferredFromUsername(t *testing.T) {
+	ks := newKeystoneServer(t)
+	ks.catalog = catalogWith(
+		serviceEntry("compute",
+			endpoint("public", "RegionOne", "http://compute.example.com"),
+		),
+	)
+
+	clouds := buildPasswordCloudsYAML(ks.URL, "")
+	session, err := openstack.Authenticate(context.Background(), clouds, "openstack", "")
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if !session.IsAuthenticated() {
+		t.Error("expected session to be authenticated")
+	}
+	auth, _ := ks.lastTokenBody["auth"].(map[string]any)
+	identity, _ := auth["identity"].(map[string]any)
+	methods, _ := identity["methods"].([]any)
+	if len(methods) != 1 || methods[0] != "password" {
+		t.Errorf("expected inferred password method, got %v", methods)
 	}
 }
 

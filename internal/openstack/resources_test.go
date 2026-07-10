@@ -351,10 +351,10 @@ func TestDeleteFloatingIPs_Filtering(t *testing.T) {
 func TestDeleteFloatingIPs_MultipleIPsPartialMatch(t *testing.T) {
 	srv := newNetworkTestServer(t)
 	fips := []fipRecord{
-		{ID: "fip-001", Description: fipDesc("mycluster")},   // match
-		{ID: "fip-002", Description: fipDesc("othercluster")}, // no match
+		{ID: "fip-001", Description: fipDesc("mycluster")},     // match
+		{ID: "fip-002", Description: fipDesc("othercluster")},  // no match
 		{ID: "fip-003", Description: "Some other description"}, // no match
-		{ID: "fip-004", Description: fipDesc("mycluster")},   // match
+		{ID: "fip-004", Description: fipDesc("mycluster")},     // match
 	}
 	srv.fipLists = [][]fipRecord{fips, {}}
 
@@ -1853,6 +1853,37 @@ func TestDeleteAppCredential_HTTP500_PropagatesError(t *testing.T) {
 	err := session.DeleteAppCredential(context.Background(), logr.Discard(), cloudsYAML, "openstack")
 	if err == nil {
 		t.Fatal("expected error for HTTP 500, got nil")
+	}
+}
+
+// Scenario: Password auth has no application credential → deletion is a no-op
+func TestDeleteAppCredential_PasswordAuth_NoOp(t *testing.T) {
+	srv := newIdentityTestServer(t)
+	session, _ := srv.authenticate(t)
+
+	passwordYAML := fmt.Sprintf(`
+clouds:
+  openstack:
+    auth_type: v3password
+    auth:
+      auth_url: %s
+      username: alice
+      password: s3cret
+      project_id: proj-123
+      user_domain_name: Default
+    interface: public
+    region_name: RegionOne
+`, srv.URL)
+
+	if err := session.DeleteAppCredential(context.Background(), logr.Discard(), passwordYAML, "openstack"); err != nil {
+		t.Fatalf("expected nil for password auth (no appcred), got: %v", err)
+	}
+
+	srv.mu.Lock()
+	deleted := srv.deletedAppcredID
+	srv.mu.Unlock()
+	if deleted != "" {
+		t.Errorf("expected no DELETE call, but appcred %q was deleted", deleted)
 	}
 }
 
