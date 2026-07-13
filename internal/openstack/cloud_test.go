@@ -6,9 +6,11 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/azimuth-cloud/cluster-api-janitor-openstack/internal/openstack"
@@ -279,6 +281,154 @@ func TestAuthenticate_Password_Successful(t *testing.T) {
 	}
 }
 
+// Scenario: passwordScope variants (project id, project name with each domain
+// fallback, project name with no domain info, domain-only scopes, no scope).
+func TestAuthenticate_PasswordScope_Variants(t *testing.T) {
+	cases := []struct {
+		name      string
+		authExtra string
+		wantScope func(t *testing.T, scope map[string]any)
+	}{
+		{"project_id set", "      project_id: proj-999\n", func(t *testing.T, s map[string]any) {
+			proj, _ := s["project"].(map[string]any)
+			if proj["id"] != "proj-999" {
+				t.Errorf("expected project id proj-999, got %v", proj)
+			}
+		}},
+		{"project_name + project_domain_id", "      project_name: myproj\n      project_domain_id: dom-1\n", func(t *testing.T, s map[string]any) {
+			proj, _ := s["project"].(map[string]any)
+			domain, _ := proj["domain"].(map[string]any)
+			if proj["name"] != "myproj" || domain["id"] != "dom-1" {
+				t.Errorf("unexpected: %v", s)
+			}
+		}},
+		{"project_name + project_domain_name", "      project_name: myproj\n      project_domain_name: MyDomain\n", func(t *testing.T, s map[string]any) {
+			proj, _ := s["project"].(map[string]any)
+			domain, _ := proj["domain"].(map[string]any)
+			if domain["name"] != "MyDomain" {
+				t.Errorf("unexpected: %v", s)
+			}
+		}},
+		{"project_name + user_domain_id fallback", "      project_name: myproj\n      user_domain_id: udom-1\n", func(t *testing.T, s map[string]any) {
+			proj, _ := s["project"].(map[string]any)
+			domain, _ := proj["domain"].(map[string]any)
+			if domain["id"] != "udom-1" {
+				t.Errorf("expected fallback to user_domain_id, got: %v", s)
+			}
+		}},
+		{"project_name + user_domain_name fallback", "      project_name: myproj\n      user_domain_name: UserDom\n", func(t *testing.T, s map[string]any) {
+			proj, _ := s["project"].(map[string]any)
+			domain, _ := proj["domain"].(map[string]any)
+			if domain["name"] != "UserDom" {
+				t.Errorf("expected fallback to user_domain_name, got: %v", s)
+			}
+		}},
+		{"project_name, no domain info", "      project_name: myproj\n", func(t *testing.T, s map[string]any) {
+			proj, _ := s["project"].(map[string]any)
+			if _, ok := proj["domain"]; ok {
+				t.Errorf("expected no domain key, got: %v", proj)
+			}
+		}},
+		{"domain_id only, no project", "      domain_id: dom-only\n", func(t *testing.T, s map[string]any) {
+			domain, _ := s["domain"].(map[string]any)
+			if domain["id"] != "dom-only" {
+				t.Errorf("unexpected: %v", s)
+			}
+		}},
+		{"domain_name only, no project", "      domain_name: DomOnly\n", func(t *testing.T, s map[string]any) {
+			domain, _ := s["domain"].(map[string]any)
+			if domain["name"] != "DomOnly" {
+				t.Errorf("unexpected: %v", s)
+			}
+		}},
+		{"nothing set, no scope", "", func(t *testing.T, s map[string]any) {
+			if s != nil {
+				t.Errorf("expected nil scope, got: %v", s)
+			}
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ks := newKeystoneServer(t)
+			ks.catalog = catalogWith(serviceEntry("compute", endpoint("public", "RegionOne", "http://x")))
+			clouds := fmt.Sprintf(`
+clouds:
+  openstack:
+    auth_type: v3password
+    auth:
+      auth_url: %s
+      username: alice
+      password: s3cret
+%s`, ks.URL, c.authExtra)
+			_, err := openstack.Authenticate(context.Background(), clouds, "openstack", "")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			auth, _ := ks.lastTokenBody["auth"].(map[string]any)
+			var scopeMap map[string]any
+			if scope, ok := auth["scope"]; ok && scope != nil {
+				scopeMap, _ = scope.(map[string]any)
+			}
+			c.wantScope(t, scopeMap)
+		})
+	}
+}
+
+// Scenario: user_id set → skips username and domain
+func TestAuthenticate_Password_UserIDSet_SkipsUsernameAndDomain(t *testing.T) {
+	ks := newKeystoneServer(t)
+	ks.catalog = catalogWith(serviceEntry("compute", endpoint("public", "RegionOne", "http://x")))
+	clouds := fmt.Sprintf(`
+clouds:
+  openstack:
+    auth_type: v3password
+    auth:
+      auth_url: %s
+      user_id: uid-123
+      password: s3cret
+`, ks.URL)
+	_, err := openstack.Authenticate(context.Background(), clouds, "openstack", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	auth, _ := ks.lastTokenBody["auth"].(map[string]any)
+	identity, _ := auth["identity"].(map[string]any)
+	pw, _ := identity["password"].(map[string]any)
+	user, _ := pw["user"].(map[string]any)
+	if user["id"] != "uid-123" {
+		t.Errorf("expected user id uid-123, got %v", user)
+	}
+	if _, hasName := user["name"]; hasName {
+		t.Errorf("expected no name key when user_id set, got %v", user)
+	}
+}
+
+// Scenario: username set without any user domain → domain key omitted
+func TestAuthenticate_Password_NoUserDomain_OmitsDomainKey(t *testing.T) {
+	ks := newKeystoneServer(t)
+	ks.catalog = catalogWith(serviceEntry("compute", endpoint("public", "RegionOne", "http://x")))
+	clouds := fmt.Sprintf(`
+clouds:
+  openstack:
+    auth_type: v3password
+    auth:
+      auth_url: %s
+      username: alice
+      password: s3cret
+`, ks.URL)
+	_, err := openstack.Authenticate(context.Background(), clouds, "openstack", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	auth, _ := ks.lastTokenBody["auth"].(map[string]any)
+	identity, _ := auth["identity"].(map[string]any)
+	pw, _ := identity["password"].(map[string]any)
+	user, _ := pw["user"].(map[string]any)
+	if _, hasDomain := user["domain"]; hasDomain {
+		t.Errorf("expected no domain key, got %v", user)
+	}
+}
+
 // Scenario: auth_type omitted but username present is inferred as v3password
 func TestAuthenticate_Password_InferredFromUsername(t *testing.T) {
 	ks := newKeystoneServer(t)
@@ -365,6 +515,116 @@ func TestAuthenticate_TokenRequestFails_NonFatal(t *testing.T) {
 				t.Fatalf("expected error for HTTP %d, got nil", code)
 			}
 		})
+	}
+}
+
+// Scenario: httpStatusError exposes the HTTP status code and message
+func TestHTTPStatusError_ExposesStatusCode(t *testing.T) {
+	ks := newKeystoneServer(t)
+	ks.tokenStatus = http.StatusInternalServerError
+
+	clouds := buildCloudsYAML(ks.URL, "v3applicationcredential")
+	_, err := openstack.Authenticate(context.Background(), clouds, "openstack", "")
+
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	var target interface{ StatusCode() int }
+	if !errors.As(err, &target) {
+		t.Fatalf("expected error implementing StatusCode() int, got %T: %v", err, err)
+	}
+	if target.StatusCode() != http.StatusInternalServerError {
+		t.Errorf("expected StatusCode() 500, got %d", target.StatusCode())
+	}
+	if err.Error() != "HTTP 500" {
+		t.Errorf("expected message %q, got %q", "HTTP 500", err.Error())
+	}
+}
+
+// Scenario: Token response body is not valid JSON
+func TestAuthenticate_TokenResponse_InvalidJSON_ReturnsError(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v3/auth/tokens", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Subject-Token", "tok")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte("{not valid json"))
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	clouds := buildCloudsYAML(srv.URL, "v3applicationcredential")
+	_, err := openstack.Authenticate(context.Background(), clouds, "openstack", "")
+
+	if err == nil {
+		t.Fatal("expected JSON decode error, got nil")
+	}
+}
+
+// Scenario: Catalog request fails with a non-404 error
+func TestAuthenticate_CatalogReturnsServerError_PropagatesError(t *testing.T) {
+	ks := newKeystoneServer(t)
+	ks.catalogStatus = http.StatusInternalServerError
+
+	clouds := buildCloudsYAML(ks.URL, "v3applicationcredential")
+	_, err := openstack.Authenticate(context.Background(), clouds, "openstack", "")
+
+	if err == nil {
+		t.Fatal("expected error for catalog HTTP 500, got nil")
+	}
+}
+
+// Scenario: Catalog response body is not valid JSON
+func TestAuthenticate_CatalogResponse_InvalidJSON_ReturnsError(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v3/auth/tokens", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Subject-Token", "tok")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"token": map[string]any{"user": map[string]any{"id": "u"}},
+		})
+	})
+	mux.HandleFunc("/v3/auth/catalog", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("not json"))
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	clouds := buildCloudsYAML(srv.URL, "v3applicationcredential")
+	_, err := openstack.Authenticate(context.Background(), clouds, "openstack", "")
+
+	if err == nil {
+		t.Fatal("expected catalog JSON decode error, got nil")
+	}
+}
+
+// Scenario: No interface configured → defaults to "public"
+func TestAuthenticate_NoInterfaceSpecified_DefaultsToPublic(t *testing.T) {
+	ks := newKeystoneServer(t)
+	ks.catalog = catalogWith(
+		serviceEntry("compute", endpoint("public", "RegionOne", "http://compute-public.example.com")),
+		serviceEntry("network", endpoint("internal", "RegionOne", "http://network-internal.example.com")),
+	)
+
+	clouds := fmt.Sprintf(`
+clouds:
+  openstack:
+    auth_type: v3applicationcredential
+    auth:
+      auth_url: %s
+      application_credential_id: appcred-abc123
+      application_credential_secret: super-secret
+`, ks.URL) // no "interface:" line
+	session, err := openstack.Authenticate(context.Background(), clouds, "openstack", "")
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !session.HasEndpoint("compute") {
+		t.Error("expected compute endpoint (public, default interface)")
+	}
+	if session.HasEndpoint("network") {
+		t.Error("expected network endpoint absent (only internal, default is public)")
 	}
 }
 
@@ -627,6 +887,21 @@ func TestAuthenticate_InvalidCACert_TLSFails(t *testing.T) {
 	}
 }
 
+// Scenario: CA cert content is not valid PEM → AppendCertsFromPEM fails
+func TestAuthenticate_MalformedPEM_ReturnsError(t *testing.T) {
+	ks := newTLSKeystoneServer(t)
+
+	clouds := buildCloudsYAML(ks.URL, "v3applicationcredential")
+	_, err := openstack.Authenticate(context.Background(), clouds, "openstack", "not a valid pem certificate at all")
+
+	if err == nil {
+		t.Fatal("expected error for malformed CA cert PEM, got nil")
+	}
+	if !strings.Contains(err.Error(), "append CA certificate") {
+		t.Errorf("expected AppendCertsFromPEM failure message, got: %v", err)
+	}
+}
+
 // ── AppCredentialID ─────────────────────────────────────────────────────────
 
 // Scenario: Extracting application credential ID from clouds.yaml
@@ -646,6 +921,14 @@ clouds:
 	}
 	if id != "my-appcred-id-xyz" {
 		t.Errorf("expected %q, got %q", "my-appcred-id-xyz", id)
+	}
+}
+
+// Scenario: Malformed clouds.yaml → parse error
+func TestAppCredentialID_InvalidYAML_ReturnsError(t *testing.T) {
+	_, err := openstack.AppCredentialID("not: valid: yaml: :", "openstack")
+	if err == nil {
+		t.Fatal("expected YAML parse error, got nil")
 	}
 }
 

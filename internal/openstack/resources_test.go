@@ -612,6 +612,101 @@ func TestDeleteFloatingIPs_NothingToDelete_NoVerification(t *testing.T) {
 	}
 }
 
+// Scenario: DELETE returns 404 (already gone) → treated as success, not an error
+func TestDeleteFloatingIPs_DeleteReturns404_TreatedAsSuccess(t *testing.T) {
+	srv := newNetworkTestServer(t)
+	fip := fipRecord{ID: "fip-404", Description: fipDesc("mycluster")}
+	srv.fipLists = [][]fipRecord{{fip}, {}}
+	srv.deleteStatus["fip-404"] = http.StatusNotFound
+
+	session := srv.authenticate(t)
+	if err := session.DeleteFloatingIPs(context.Background(), logr.Discard(), "mycluster"); err != nil {
+		t.Fatalf("expected 404 on delete to be treated as success, got: %v", err)
+	}
+}
+
+// Scenario: pagination edge cases in nextPageURL — malformed top-level JSON,
+// missing "*_links" field, malformed links array, and no "next" rel present.
+func TestListPages_PaginationEdgeCases(t *testing.T) {
+	cases := []struct {
+		name    string
+		body    string
+		wantErr bool
+	}{
+		{
+			name:    "malformed top-level JSON",
+			body:    `{not valid`,
+			wantErr: true,
+		},
+		{
+			name:    "missing floatingips_links field",
+			body:    `{"floatingips": [{"id":"a","description":""}]}`,
+			wantErr: false,
+		},
+		{
+			name:    "malformed links array",
+			body:    `{"floatingips": [], "floatingips_links": "not an array"}`,
+			wantErr: false,
+		},
+		{
+			name:    "no next rel present",
+			body:    `{"floatingips": [], "floatingips_links": [{"rel":"previous","href":"http://x/prev"}]}`,
+			wantErr: false,
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/v3/auth/tokens", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("X-Subject-Token", "tok")
+				w.WriteHeader(http.StatusCreated)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"token": map[string]any{"user": map[string]any{"id": "u"}},
+				})
+			})
+			mux.HandleFunc("/v3/auth/catalog", func(w http.ResponseWriter, r *http.Request) {
+				selfURL := "http://" + r.Host
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"catalog": []any{
+						map[string]any{"type": "network", "endpoints": []any{
+							map[string]any{"interface": "public", "region_id": "RegionOne", "url": selfURL},
+						}},
+					},
+				})
+			})
+			mux.HandleFunc("/v2.0/floatingips", func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(tt.body))
+			})
+			srv := httptest.NewServer(mux)
+			t.Cleanup(srv.Close)
+
+			cloudsYAML := fmt.Sprintf(`
+clouds:
+  openstack:
+    auth_type: v3applicationcredential
+    auth:
+      auth_url: %s
+      application_credential_id: id
+      application_credential_secret: secret
+    interface: public
+`, srv.URL)
+			session, err := openstack.Authenticate(context.Background(), cloudsYAML, "openstack", "")
+			if err != nil {
+				t.Fatalf("authenticate: %v", err)
+			}
+			session.SleepFunc = func(d time.Duration) {}
+
+			err = session.DeleteFloatingIPs(context.Background(), logr.Discard(), "mycluster")
+			if tt.wantErr && err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
 // Scenario: Pas d'endpoint "network" dans le catalogue → CatalogError
 func TestDeleteFloatingIPs_NoNetworkEndpoint_ReturnsCatalogError(t *testing.T) {
 	// Use a Keystone server that only advertises a "compute" endpoint (no "network")
@@ -1351,6 +1446,69 @@ clouds:
 	}
 	session.SleepFunc = func(d time.Duration) {}
 	return session
+}
+
+// newRawVolumesServer builds a self-referential "volumev3" Keystone+Cinder mock
+// whose /volumes/detail handler returns a caller-supplied raw response body,
+// for exercising listVolumeItems' JSON-decode error paths.
+func newRawVolumesServer(t *testing.T, body string) *openstack.Session {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v3/auth/tokens", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Subject-Token", "tok")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"token": map[string]any{"user": map[string]any{"id": "u"}},
+		})
+	})
+	mux.HandleFunc("/v3/auth/catalog", func(w http.ResponseWriter, r *http.Request) {
+		selfURL := "http://" + r.Host
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"catalog": []any{
+				map[string]any{"type": "volumev3", "endpoints": []any{
+					map[string]any{"interface": "public", "region_id": "RegionOne", "url": selfURL},
+				}},
+			},
+		})
+	})
+	mux.HandleFunc("/volumes/detail", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(body))
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	cloudsYAML := fmt.Sprintf(`
+clouds:
+  openstack:
+    auth_type: v3applicationcredential
+    auth:
+      auth_url: %s
+      application_credential_id: id
+      application_credential_secret: secret
+    interface: public
+`, srv.URL)
+	session, err := openstack.Authenticate(context.Background(), cloudsYAML, "openstack", "")
+	if err != nil {
+		t.Fatalf("authenticate: %v", err)
+	}
+	session.SleepFunc = func(d time.Duration) {}
+	return session
+}
+
+// Scenario: top-level list response is not valid JSON
+func TestDeleteVolumes_MalformedListResponse_ReturnsError(t *testing.T) {
+	session := newRawVolumesServer(t, `{not valid json`)
+	if err := session.DeleteVolumes(context.Background(), logr.Discard(), "mycluster"); err == nil {
+		t.Fatal("expected error for malformed top-level JSON")
+	}
+}
+
+// Scenario: "volumes" key is present but not an array
+func TestDeleteVolumes_MalformedVolumesKey_ReturnsError(t *testing.T) {
+	session := newRawVolumesServer(t, `{"volumes": "not an array"}`)
+	if err := session.DeleteVolumes(context.Background(), logr.Discard(), "mycluster"); err == nil {
+		t.Fatal("expected error for malformed volumes key")
+	}
 }
 
 // ── Epic 5: Cinder Volume Management ─────────────────────────────────────────
