@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	"github.com/azimuth-cloud/cluster-api-janitor-openstack/internal/controller"
@@ -44,6 +46,25 @@ func newReconciler(purgeFunc func(context.Context, openstack.PurgeOptions) error
 		Scheme:    testScheme,
 		PurgeFunc: purgeFunc,
 		SleepFunc: func(time.Duration) {}, // no-op: avoid real sleeps in tests
+	}
+	return r, c
+}
+
+func newReconcilerWithInterceptors(
+	purgeFunc func(context.Context, openstack.PurgeOptions) error,
+	interceptors interceptor.Funcs,
+	objs ...client.Object,
+) (*controller.OpenStackClusterReconciler, client.Client) {
+	c := fake.NewClientBuilder().
+		WithScheme(testScheme).
+		WithObjects(objs...).
+		WithInterceptorFuncs(interceptors).
+		Build()
+	r := &controller.OpenStackClusterReconciler{
+		Client:    c,
+		Scheme:    testScheme,
+		PurgeFunc: purgeFunc,
+		SleepFunc: func(time.Duration) {},
 	}
 	return r, c
 }
@@ -281,5 +302,248 @@ func TestReconcile_IgnoresNotFound_WhenClusterDeletedDuringRetry(t *testing.T) {
 	// annotateRetry will see NotFound — must be ignored, not propagated.
 	if _, err := r.Reconcile(context.Background(), reconcileRequest("mycluster", "default")); err != nil {
 		t.Fatalf("expected no error when cluster deleted during retry annotation, got: %v", err)
+	}
+}
+
+// ── Additional error-path and branch coverage ────────────────────────────────
+
+// Scenario: fetching the cluster fails with a non-NotFound error → propagated
+func TestReconcile_GetError_NonNotFound_Propagates(t *testing.T) {
+	r, _ := newReconcilerWithInterceptors(nil, interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key types.NamespacedName, obj client.Object, opts ...client.GetOption) error {
+			return errors.New("boom")
+		},
+	})
+
+	if _, err := r.Reconcile(context.Background(), reconcileRequest("mycluster", "default")); err == nil {
+		t.Fatal("expected error to be propagated, got nil")
+	}
+}
+
+// Scenario: adding the finalizer fails on Update → propagated
+func TestReconcile_AddFinalizer_UpdateError_Propagates(t *testing.T) {
+	cluster := newCluster("mycluster", "default")
+	r, _ := newReconcilerWithInterceptors(nil, interceptor.Funcs{
+		Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+			return errors.New("update failed")
+		},
+	}, cluster)
+
+	_, err := r.Reconcile(context.Background(), reconcileRequest("mycluster", "default"))
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "adding finalizer:") {
+		t.Errorf("expected error to wrap %q, got: %v", "adding finalizer:", err)
+	}
+}
+
+// Scenario: fetching the identity secret fails with a non-NotFound error → propagated
+func TestReconcile_GetSecret_NonNotFoundError_Propagates(t *testing.T) {
+	cluster := newCluster("mycluster", "default", withFinalizer, withDeletionTimestamp)
+	r, _ := newReconcilerWithInterceptors(nil, interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key types.NamespacedName, obj client.Object, opts ...client.GetOption) error {
+			if _, ok := obj.(*corev1.Secret); ok {
+				return errors.New("secret get failed")
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	}, cluster)
+
+	_, err := r.Reconcile(context.Background(), reconcileRequest("mycluster", "default"))
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "fetching identity secret:") {
+		t.Errorf("expected error to wrap %q, got: %v", "fetching identity secret:", err)
+	}
+}
+
+// Scenario: identity secret does not exist → Reconcile returns early without error
+func TestReconcile_SecretNotFound_ReturnsEarlyWithoutError(t *testing.T) {
+	cluster := newCluster("mycluster", "default", withFinalizer, withDeletionTimestamp)
+	purgeCalled := false
+	r, _ := newReconciler(func(context.Context, openstack.PurgeOptions) error {
+		purgeCalled = true
+		return nil
+	}, cluster) // no secret created
+
+	res, err := r.Reconcile(context.Background(), reconcileRequest("mycluster", "default"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res != (ctrl.Result{}) {
+		t.Errorf("expected empty result, got: %v", res)
+	}
+	if purgeCalled {
+		t.Error("expected purge NOT to be called when identity secret is absent")
+	}
+}
+
+// Scenario: IdentityRef.CloudName empty → defaults to "openstack"
+func TestReconcile_CloudName_DefaultsToOpenstack_WhenEmpty(t *testing.T) {
+	cluster := newCluster("mycluster", "default", withFinalizer, withDeletionTimestamp,
+		func(c *infrav1.OpenStackCluster) { c.Spec.IdentityRef.CloudName = "" })
+	secret := newSecret("cloud-credentials", "default")
+
+	var capturedCloudName string
+	r, _ := newReconciler(func(_ context.Context, opts openstack.PurgeOptions) error {
+		capturedCloudName = opts.CloudName
+		return nil
+	}, cluster, secret)
+
+	if _, err := r.Reconcile(context.Background(), reconcileRequest("mycluster", "default")); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if capturedCloudName != "openstack" {
+		t.Errorf("expected CloudName to default to %q, got %q", "openstack", capturedCloudName)
+	}
+}
+
+// Scenario: purge fails and the subsequent retry-annotation Patch also fails
+// with a non-NotFound error → propagated
+func TestReconcile_AnnotateRetry_NonNotFoundError_Propagates(t *testing.T) {
+	cluster := newCluster("mycluster", "default", withFinalizer, withDeletionTimestamp)
+	secret := newSecret("cloud-credentials", "default")
+
+	r, _ := newReconcilerWithInterceptors(
+		func(context.Context, openstack.PurgeOptions) error { return errors.New("purge failed") },
+		interceptor.Funcs{
+			Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				return errors.New("patch failed")
+			},
+		},
+		cluster, secret,
+	)
+
+	_, err := r.Reconcile(context.Background(), reconcileRequest("mycluster", "default"))
+	if err == nil {
+		t.Fatal("expected error to be propagated, got nil")
+	}
+}
+
+// Scenario: credential policy "delete" and this is the last finalizer →
+// secret deleted and janitor finalizer removed
+func TestReconcile_CredentialPolicyDelete_LastFinalizer_DeletesSecretAndRemovesFinalizer(t *testing.T) {
+	cluster := newCluster("mycluster", "default", withFinalizer, withDeletionTimestamp)
+	secret := newSecret("cloud-credentials", "default")
+	secret.Annotations = map[string]string{controller.CredentialPolicyAnnotation: controller.PolicyDelete}
+
+	r, c := newReconciler(func(context.Context, openstack.PurgeOptions) error { return nil }, cluster, secret)
+
+	if _, err := r.Reconcile(context.Background(), reconcileRequest("mycluster", "default")); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var gotSecret corev1.Secret
+	err := c.Get(context.Background(), types.NamespacedName{Name: "cloud-credentials", Namespace: "default"}, &gotSecret)
+	if !apierrors.IsNotFound(err) {
+		t.Errorf("expected credential secret to be deleted, got err: %v", err)
+	}
+
+	got := getClusterOrNil(t, c, "mycluster", "default")
+	if got != nil && controllerutil.ContainsFinalizer(got, controller.Finalizer) {
+		t.Error("expected janitor finalizer to be removed")
+	}
+}
+
+// Scenario: credential policy "delete" but other finalizers remain → secret
+// kept, retry annotation set, janitor finalizer NOT removed
+func TestReconcile_CredentialPolicyDelete_OtherFinalizersPresent_SecretKeptRetryAnnotated(t *testing.T) {
+	cluster := newCluster("mycluster", "default", withFinalizer, withDeletionTimestamp)
+	controllerutil.AddFinalizer(cluster, "other.finalizer.example.com")
+	secret := newSecret("cloud-credentials", "default")
+	secret.Annotations = map[string]string{controller.CredentialPolicyAnnotation: controller.PolicyDelete}
+
+	r, c := newReconciler(func(context.Context, openstack.PurgeOptions) error { return nil }, cluster, secret)
+
+	if _, err := r.Reconcile(context.Background(), reconcileRequest("mycluster", "default")); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var gotSecret corev1.Secret
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "cloud-credentials", Namespace: "default"}, &gotSecret); err != nil {
+		t.Errorf("expected credential secret to still exist, got err: %v", err)
+	}
+
+	got := getClusterOrNil(t, c, "mycluster", "default")
+	if got == nil {
+		t.Fatal("expected cluster to still exist")
+	}
+	if got.Annotations[controller.RetryAnnotation] == "" {
+		t.Error("expected retry annotation to be set")
+	}
+	if !controllerutil.ContainsFinalizer(got, controller.Finalizer) {
+		t.Error("expected janitor finalizer to still be present")
+	}
+}
+
+// Scenario: removing the janitor finalizer fails on Update → propagated
+func TestReconcile_RemoveFinalizer_UpdateError_Propagates(t *testing.T) {
+	cluster := newCluster("mycluster", "default", withFinalizer, withDeletionTimestamp)
+	secret := newSecret("cloud-credentials", "default") // no credential-policy-delete annotation
+
+	r, _ := newReconcilerWithInterceptors(
+		func(context.Context, openstack.PurgeOptions) error { return nil },
+		interceptor.Funcs{
+			Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+				return errors.New("update failed")
+			},
+		},
+		cluster, secret,
+	)
+
+	_, err := r.Reconcile(context.Background(), reconcileRequest("mycluster", "default"))
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "removing finalizer:") {
+		t.Errorf("expected error to wrap %q, got: %v", "removing finalizer:", err)
+	}
+}
+
+// Scenario: credential policy "delete", last finalizer, but deleting the
+// secret fails with a non-NotFound error → propagated
+func TestDeleteSecret_ErrorPath_ViaReconcile(t *testing.T) {
+	cluster := newCluster("mycluster", "default", withFinalizer, withDeletionTimestamp)
+	secret := newSecret("cloud-credentials", "default")
+	secret.Annotations = map[string]string{controller.CredentialPolicyAnnotation: controller.PolicyDelete}
+
+	r, _ := newReconcilerWithInterceptors(
+		func(context.Context, openstack.PurgeOptions) error { return nil },
+		interceptor.Funcs{
+			Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+				return errors.New("delete failed")
+			},
+		},
+		cluster, secret,
+	)
+
+	_, err := r.Reconcile(context.Background(), reconcileRequest("mycluster", "default"))
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "deleting credential secret:") {
+		t.Errorf("expected error to wrap %q, got: %v", "deleting credential secret:", err)
+	}
+}
+
+// Scenario: PurgeFunc is nil → falls back to the real openstack.PurgeResources,
+// which fails fast (no matching cloud in clouds.yaml) and triggers a retry.
+func TestPurge_NilPurgeFunc_FallsBackToPurgeResources(t *testing.T) {
+	cluster := newCluster("mycluster", "default", withFinalizer, withDeletionTimestamp)
+	secret := newSecret("cloud-credentials", "default") // clouds.yaml: "clouds: {}" — no "openstack" entry
+	r, c := newReconciler(nil, cluster, secret)         // PurgeFunc left nil
+
+	if _, err := r.Reconcile(context.Background(), reconcileRequest("mycluster", "default")); err != nil {
+		t.Fatalf("expected nil (retry handled internally), got: %v", err)
+	}
+
+	got := getClusterOrNil(t, c, "mycluster", "default")
+	if got == nil {
+		t.Fatal("cluster not found after reconcile")
+	}
+	if got.Annotations[controller.RetryAnnotation] == "" {
+		t.Error("expected retry annotation to be set after fallback PurgeResources failure")
 	}
 }

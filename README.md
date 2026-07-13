@@ -131,9 +131,9 @@ go build ./...
 go test ./...
 ```
 
-The test suite covers 108 unit tests across 4 packages using only the standard
-`testing` package and `controller-runtime`'s fake client — no external cluster
-required.
+The test suite covers 168 unit tests across 4 packages (93% statement coverage
+in `internal/`) using only the standard `testing` package and
+`controller-runtime`'s fake client — no external cluster required.
 
 ### Lint and format
 
@@ -163,7 +163,7 @@ CI uses `nix-build` for reproducible builds. The `tests` derivation runs
 external toolchain needed:
 
 ```sh
-# CI check: go fmt + go vet + 108 unit tests
+# CI check: go fmt + go vet + 168 unit tests
 nix-build nix -A tests
 
 # Build the manager binary only
