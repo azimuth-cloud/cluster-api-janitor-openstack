@@ -1,0 +1,98 @@
+# Epic 10 — US10.1 / US10.2 packaging scenarios
+# Run with: docker run -i --rm -v $(pwd):/apps helmunittest/helm-unittest chart
+suite: Packaging and deployment tests
+
+tests:
+  # US10.1 — Image sécurisée
+  - it: should run pods as non-root (US10.1)
+    template: templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.securityContext.runAsNonRoot
+          value: true
+
+  - it: should use a read-only root filesystem (US10.1)
+    template: templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem
+          value: true
+
+  - it: should drop all Linux capabilities (US10.1)
+    template: templates/deployment.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].securityContext.capabilities.drop
+          content: ALL
+
+  # US10.2 — Helm chart
+  - it: should inject CAPI_JANITOR_DEFAULT_VOLUMES_POLICY with default value "delete" (US10.2)
+    template: templates/deployment.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CAPI_JANITOR_DEFAULT_VOLUMES_POLICY
+            value: delete
+
+  - it: should inject overridden defaultVolumesPolicy "keep" (US10.2)
+    template: templates/deployment.yaml
+    set:
+      defaultVolumesPolicy: keep
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CAPI_JANITOR_DEFAULT_VOLUMES_POLICY
+            value: keep
+
+  - it: should inject CAPI_JANITOR_RETRY_DEFAULT_DELAY with default value "60" (US10.2)
+    template: templates/deployment.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CAPI_JANITOR_RETRY_DEFAULT_DELAY
+            value: "60"
+
+  - it: should inject overridden retryDefaultDelay (US10.2)
+    template: templates/deployment.yaml
+    set:
+      retryDefaultDelay: 120
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CAPI_JANITOR_RETRY_DEFAULT_DELAY
+            value: "120"
+
+  - it: should have a liveness probe at /healthz (US10.2)
+    template: templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].livenessProbe.httpGet.path
+          value: /healthz
+
+  - it: should have a readiness probe at /readyz (US10.2)
+    template: templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.httpGet.path
+          value: /readyz
+
+  - it: should grant update verb on openstackclusters (US10.2)
+    template: templates/clusterrole.yaml
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups:
+              - infrastructure.cluster.x-k8s.io
+            resources:
+              - openstackclusters
+            verbs:
+              - list
+              - get
+              - watch
+              - patch
+              - update

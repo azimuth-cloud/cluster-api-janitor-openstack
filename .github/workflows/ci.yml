@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions: {}
+
+jobs:
+  nix:
+    name: fmt + vet + test (Nix)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: DeterminateSystems/nix-installer-action@07ebb8d2749aa2fac2baae7d1cfa011e4acfd8d1 # v5
+
+      - name: Run fmt + vet + unit tests
+        run: nix-build nix -A tests

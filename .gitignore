@@ -1,9 +1,14 @@
-__pycache__
-*.egg-info
-.python-version
+# Go
+/bin/
+*.test
+*.out
+
+# Helm
 chart/charts/*
 chart/Chart.lock
-# ignore unit test stuff
-.stestr/*
-.tox/*
-.coverage
+
+# Nix
+result
+result-*
+sbom.cdx.json
+*.tar.gz

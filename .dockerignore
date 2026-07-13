@@ -1,6 +1,0 @@
-# Exclude the dockerfile itself
-Dockerfile
-
-# Exclude Python caches
-**/__pycache__
-*.egg-info

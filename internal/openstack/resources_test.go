@@ -1,0 +1,2051 @@
+package openstack_test
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/go-logr/logr"
+
+	"github.com/azimuth-cloud/cluster-api-janitor-openstack/internal/openstack"
+)
+
+// ── Mock server ───────────────────────────────────────────────────────────────
+
+// fipRecord represents a Neutron floating IP in list responses.
+type fipRecord struct {
+	ID          string `json:"id"`
+	Description string `json:"description"`
+}
+
+// networkTestServer is a mock OpenStack server that handles Keystone auth +
+// a Neutron-like API on the same HTTP test server. The catalog advertises the
+// server's own URL as the "network" endpoint, so Sessions authenticate and
+// resolve resource URLs against this single server.
+type networkTestServer struct {
+	*httptest.Server
+	mu          sync.Mutex
+	fipLists    [][]fipRecord // sequence of list responses; last entry is reused
+	fipGetCount int           // total number of GET /v2.0/floatingips calls
+	// Per-FIP DELETE response status (default 204 NoContent).
+	deleteStatus map[string]int
+	// IDs deleted in call order.
+	deletedFIPs []string
+}
+
+func newNetworkTestServer(t *testing.T) *networkTestServer {
+	t.Helper()
+	srv := &networkTestServer{
+		deleteStatus: make(map[string]int),
+	}
+	mux := http.NewServeMux()
+
+	// Keystone: token endpoint
+	mux.HandleFunc("/v3/auth/tokens", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("X-Subject-Token", "test-network-token")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"token": map[string]any{"user": map[string]any{"id": "test-user"}},
+		})
+	})
+
+	// Keystone: service catalog — self-referential: "network" endpoint = this server
+	mux.HandleFunc("/v3/auth/catalog", func(w http.ResponseWriter, r *http.Request) {
+		selfURL := "http://" + r.Host
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"catalog": []any{
+				map[string]any{
+					"type": "network",
+					"endpoints": []any{
+						map[string]any{
+							"interface": "public",
+							"region_id": "RegionOne",
+							"url":       selfURL,
+						},
+					},
+				},
+			},
+		})
+	})
+
+	// Neutron: list floating IPs (exact path — no trailing slash to avoid redirect)
+	mux.HandleFunc("/v2.0/floatingips", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		srv.mu.Lock()
+		srv.fipGetCount++
+		idx := srv.fipGetCount - 1
+		var list []fipRecord
+		if len(srv.fipLists) > 0 {
+			if idx < len(srv.fipLists) {
+				list = srv.fipLists[idx]
+			} else {
+				list = srv.fipLists[len(srv.fipLists)-1]
+			}
+		}
+		srv.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"floatingips": list})
+	})
+
+	// Neutron: delete floating IP by ID (subtree pattern handles /v2.0/floatingips/{id})
+	mux.HandleFunc("/v2.0/floatingips/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		id := strings.TrimPrefix(r.URL.Path, "/v2.0/floatingips/")
+		srv.mu.Lock()
+		srv.deletedFIPs = append(srv.deletedFIPs, id)
+		status, ok := srv.deleteStatus[id]
+		if !ok {
+			status = http.StatusNoContent
+		}
+		srv.mu.Unlock()
+		w.WriteHeader(status)
+	})
+
+	srv.Server = httptest.NewServer(mux)
+	t.Cleanup(srv.Server.Close)
+	return srv
+}
+
+// authenticate creates an authenticated Session against this server.
+func (srv *networkTestServer) authenticate(t *testing.T) *openstack.Session {
+	t.Helper()
+	cloudsYAML := fmt.Sprintf(`
+clouds:
+  openstack:
+    auth_type: v3applicationcredential
+    auth:
+      auth_url: %s
+      application_credential_id: test-id
+      application_credential_secret: test-secret
+    interface: public
+    region_name: RegionOne
+`, srv.URL)
+	session, err := openstack.Authenticate(context.Background(), cloudsYAML, "openstack", "")
+	if err != nil {
+		t.Fatalf("authenticate: %v", err)
+	}
+	if !session.IsAuthenticated() {
+		t.Fatal("expected authenticated session with network endpoint")
+	}
+	session.SleepFunc = func(d time.Duration) {}
+	return session
+}
+
+// fipDesc returns the description that OCCM writes for a service FIP.
+func fipDesc(cluster string) string {
+	return fmt.Sprintf("Floating IP for Kubernetes external service from cluster %s", cluster)
+}
+
+// ── LB mock server ───────────────────────────────────────────────────────────
+
+type lbRecord struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// lbTestServer is a mock OpenStack server that handles Keystone auth +
+// an Octavia-like API on the same HTTP test server. The catalog advertises the
+// server's own URL as the "load-balancer" endpoint.
+type lbTestServer struct {
+	*httptest.Server
+	mu                 sync.Mutex
+	lbLists            [][]lbRecord
+	lbGetCount         int
+	listStatusOverride int // if non-zero, GET /v2/lbaas/loadbalancers returns this status
+	listFailFrom       int // 1-based GET call number from which listStatusOverride applies; 0 = from the first call
+	deleteStatus       map[string]int
+	deletedLBs         []string
+	deleteCascade      []string // cascade query param value per DELETE call
+}
+
+func newLBTestServer(t *testing.T) *lbTestServer {
+	t.Helper()
+	srv := &lbTestServer{
+		deleteStatus: make(map[string]int),
+	}
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/v3/auth/tokens", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("X-Subject-Token", "test-lb-token")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"token": map[string]any{"user": map[string]any{"id": "test-user"}},
+		})
+	})
+
+	// Self-referential catalog: "load-balancer" endpoint = this server.
+	mux.HandleFunc("/v3/auth/catalog", func(w http.ResponseWriter, r *http.Request) {
+		selfURL := "http://" + r.Host
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"catalog": []any{
+				map[string]any{
+					"type": "load-balancer",
+					"endpoints": []any{
+						map[string]any{
+							"interface": "public",
+							"region_id": "RegionOne",
+							"url":       selfURL,
+						},
+					},
+				},
+			},
+		})
+	})
+
+	mux.HandleFunc("/v2/lbaas/loadbalancers", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		srv.mu.Lock()
+		override := srv.listStatusOverride
+		failFrom := srv.listFailFrom
+		srv.lbGetCount++
+		callNum := srv.lbGetCount
+		idx := callNum - 1
+		var list []lbRecord
+		if len(srv.lbLists) > 0 {
+			if idx < len(srv.lbLists) {
+				list = srv.lbLists[idx]
+			} else {
+				list = srv.lbLists[len(srv.lbLists)-1]
+			}
+		}
+		srv.mu.Unlock()
+		if override != 0 && (failFrom == 0 || callNum >= failFrom) {
+			w.WriteHeader(override)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"loadbalancers": list})
+	})
+
+	mux.HandleFunc("/v2/lbaas/loadbalancers/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		id := strings.TrimPrefix(r.URL.Path, "/v2/lbaas/loadbalancers/")
+		cascade := r.URL.Query().Get("cascade")
+		srv.mu.Lock()
+		srv.deletedLBs = append(srv.deletedLBs, id)
+		srv.deleteCascade = append(srv.deleteCascade, cascade)
+		status, ok := srv.deleteStatus[id]
+		if !ok {
+			status = http.StatusNoContent
+		}
+		srv.mu.Unlock()
+		w.WriteHeader(status)
+	})
+
+	srv.Server = httptest.NewServer(mux)
+	t.Cleanup(srv.Server.Close)
+	return srv
+}
+
+func (srv *lbTestServer) authenticate(t *testing.T) *openstack.Session {
+	t.Helper()
+	cloudsYAML := fmt.Sprintf(`
+clouds:
+  openstack:
+    auth_type: v3applicationcredential
+    auth:
+      auth_url: %s
+      application_credential_id: test-id
+      application_credential_secret: test-secret
+    interface: public
+    region_name: RegionOne
+`, srv.URL)
+	session, err := openstack.Authenticate(context.Background(), cloudsYAML, "openstack", "")
+	if err != nil {
+		t.Fatalf("authenticate: %v", err)
+	}
+	if !session.IsAuthenticated() {
+		t.Fatal("expected authenticated session with load-balancer endpoint")
+	}
+	session.SleepFunc = func(d time.Duration) {}
+	return session
+}
+
+func lbKubeName(cluster, suffix string) string {
+	return fmt.Sprintf("kube_service_%s_%s", cluster, suffix)
+}
+
+// ── US2.1: Identify Floating IPs of a cluster ────────────────────────────────
+
+// Scenario: FIP belonging to the cluster → included in deletion
+// Scenario: FIP from another cluster → excluded
+// Scenario: FIP without Kubernetes description → excluded
+func TestDeleteFloatingIPs_Filtering(t *testing.T) {
+	tests := []struct {
+		name         string
+		description  string
+		cluster      string
+		shouldDelete bool
+	}{
+		{
+			name:         "matching cluster",
+			description:  fipDesc("mycluster"),
+			cluster:      "mycluster",
+			shouldDelete: true,
+		},
+		{
+			name:         "different cluster",
+			description:  fipDesc("othercluster"),
+			cluster:      "mycluster",
+			shouldDelete: false,
+		},
+		{
+			name:         "non-kubernetes description",
+			description:  "Some unrelated floating IP",
+			cluster:      "mycluster",
+			shouldDelete: false,
+		},
+		{
+			name:         "empty description",
+			description:  "",
+			cluster:      "mycluster",
+			shouldDelete: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := newNetworkTestServer(t)
+			fip := fipRecord{ID: "fip-001", Description: tt.description}
+			// List: FIP present before deletion; empty after (verification passes)
+			srv.fipLists = [][]fipRecord{{fip}, {}}
+
+			session := srv.authenticate(t)
+			if err := session.DeleteFloatingIPs(context.Background(), logr.Discard(), tt.cluster); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			srv.mu.Lock()
+			deleted := len(srv.deletedFIPs) > 0
+			srv.mu.Unlock()
+
+			if deleted != tt.shouldDelete {
+				t.Errorf("shouldDelete=%v but FIP was deleted=%v", tt.shouldDelete, deleted)
+			}
+		})
+	}
+}
+
+// Scenario: FIPs from multiple clusters → only those matching the target cluster are deleted
+func TestDeleteFloatingIPs_MultipleIPsPartialMatch(t *testing.T) {
+	srv := newNetworkTestServer(t)
+	fips := []fipRecord{
+		{ID: "fip-001", Description: fipDesc("mycluster")},     // match
+		{ID: "fip-002", Description: fipDesc("othercluster")},  // no match
+		{ID: "fip-003", Description: "Some other description"}, // no match
+		{ID: "fip-004", Description: fipDesc("mycluster")},     // match
+	}
+	srv.fipLists = [][]fipRecord{fips, {}}
+
+	session := srv.authenticate(t)
+	if err := session.DeleteFloatingIPs(context.Background(), logr.Discard(), "mycluster"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	srv.mu.Lock()
+	deleted := make(map[string]bool, len(srv.deletedFIPs))
+	for _, id := range srv.deletedFIPs {
+		deleted[id] = true
+	}
+	srv.mu.Unlock()
+
+	if !deleted["fip-001"] || !deleted["fip-004"] {
+		t.Errorf("expected fip-001 and fip-004 to be deleted, got: %v", srv.deletedFIPs)
+	}
+	if deleted["fip-002"] || deleted["fip-003"] {
+		t.Errorf("expected fip-002 and fip-003 to NOT be deleted, got: %v", srv.deletedFIPs)
+	}
+}
+
+// ── US2.2: Delete Floating IPs ───────────────────────────────────────────────
+
+// Scenario: Successful deletion
+// Given a FIP belonging to cluster "mycluster"
+// When the FIP purge is triggered
+// Then the FIP is deleted via the Neutron API
+func TestDeleteFloatingIPs_SuccessfulDeletion(t *testing.T) {
+	srv := newNetworkTestServer(t)
+	fips := []fipRecord{
+		{ID: "fip-001", Description: fipDesc("mycluster")},
+		{ID: "fip-002", Description: fipDesc("mycluster")},
+	}
+	srv.fipLists = [][]fipRecord{fips, {}} // first: FIPs present; verification: empty
+
+	session := srv.authenticate(t)
+	if err := session.DeleteFloatingIPs(context.Background(), logr.Discard(), "mycluster"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	srv.mu.Lock()
+	deletedIDs := srv.deletedFIPs
+	srv.mu.Unlock()
+
+	if len(deletedIDs) != 2 {
+		t.Errorf("expected 2 FIPs deleted, got %d: %v", len(deletedIDs), deletedIDs)
+	}
+	idSet := make(map[string]bool)
+	for _, id := range deletedIDs {
+		idSet[id] = true
+	}
+	for _, fip := range fips {
+		if !idSet[fip.ID] {
+			t.Errorf("expected FIP %s to be deleted", fip.ID)
+		}
+	}
+}
+
+// Scenario: HTTP 400 error during deletion
+// Then a warning is emitted
+// And deletion continues for other FIPs
+// And verification is triggered (check_fips = true)
+func TestDeleteFloatingIPs_TransientError400_ContinuesAndVerifies(t *testing.T) {
+	srv := newNetworkTestServer(t)
+	fips := []fipRecord{
+		{ID: "fip-001", Description: fipDesc("mycluster")}, // returns HTTP 400
+		{ID: "fip-002", Description: fipDesc("mycluster")}, // returns HTTP 204
+	}
+	srv.fipLists = [][]fipRecord{fips, {}} // verification returns empty
+	srv.deleteStatus["fip-001"] = http.StatusBadRequest
+
+	session := srv.authenticate(t)
+	err := session.DeleteFloatingIPs(context.Background(), logr.Discard(), "mycluster")
+
+	// Transient error must NOT be propagated
+	if err != nil {
+		t.Fatalf("expected no error for transient HTTP 400, got: %v", err)
+	}
+
+	// Both FIPs must have been attempted
+	srv.mu.Lock()
+	attempted := len(srv.deletedFIPs)
+	getCount := srv.fipGetCount
+	srv.mu.Unlock()
+
+	if attempted != 2 {
+		t.Errorf("expected both FIPs to be attempted, got %d DELETE calls", attempted)
+	}
+	// Verification GET must have been triggered (deleted=true even on transient error)
+	if getCount < 2 {
+		t.Errorf("expected at least 2 GET calls (list + verification), got %d", getCount)
+	}
+}
+
+// Scenario: HTTP 409 error (Conflict) → same behaviour as 400
+func TestDeleteFloatingIPs_TransientError409_Continues(t *testing.T) {
+	srv := newNetworkTestServer(t)
+	fips := []fipRecord{
+		{ID: "fip-conflict", Description: fipDesc("mycluster")},
+	}
+	srv.fipLists = [][]fipRecord{fips, {}}
+	srv.deleteStatus["fip-conflict"] = http.StatusConflict
+
+	session := srv.authenticate(t)
+	if err := session.DeleteFloatingIPs(context.Background(), logr.Discard(), "mycluster"); err != nil {
+		t.Fatalf("expected no error for transient HTTP 409, got: %v", err)
+	}
+}
+
+// Scenario: HTTP 500 error → exception propagated
+func TestDeleteFloatingIPs_HTTP500_PropagatesError(t *testing.T) {
+	srv := newNetworkTestServer(t)
+	fips := []fipRecord{
+		{ID: "fip-server-error", Description: fipDesc("mycluster")},
+	}
+	srv.fipLists = [][]fipRecord{fips}
+	srv.deleteStatus["fip-server-error"] = http.StatusInternalServerError
+
+	session := srv.authenticate(t)
+	err := session.DeleteFloatingIPs(context.Background(), logr.Discard(), "mycluster")
+
+	if err == nil {
+		t.Fatal("expected error for HTTP 500, got nil")
+	}
+}
+
+// Scenario: FIPs still present after deletion → error returned
+// (the controller will retry via the retry annotation)
+func TestDeleteFloatingIPs_StillPresentAfterDeletion_ReturnsError(t *testing.T) {
+	srv := newNetworkTestServer(t)
+	fip := fipRecord{ID: "fip-persistent", Description: fipDesc("mycluster")}
+	// Verification also returns the FIP — OpenStack has not deleted it yet
+	srv.fipLists = [][]fipRecord{{fip}, {fip}}
+
+	session := srv.authenticate(t)
+	err := session.DeleteFloatingIPs(context.Background(), logr.Discard(), "mycluster")
+
+	if err == nil {
+		t.Fatal("expected error when FIP persists after deletion")
+	}
+	if !strings.Contains(err.Error(), "mycluster") {
+		t.Errorf("expected error to mention cluster name, got: %v", err)
+	}
+}
+
+// Scenario: context is canceled while polling → polling stops immediately,
+// without an extra wasted list round-trip
+func TestDeleteFloatingIPs_ContextCanceledDuringPolling_StopsImmediately(t *testing.T) {
+	srv := newNetworkTestServer(t)
+	fip := fipRecord{ID: "fip-persistent", Description: fipDesc("mycluster")}
+	srv.fipLists = [][]fipRecord{{fip}, {fip}, {fip}, {fip}} // always present
+
+	session := srv.authenticate(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	session.SleepFunc = func(d time.Duration) { cancel() }
+
+	err := session.DeleteFloatingIPs(ctx, logr.Discard(), "mycluster")
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got: %v", err)
+	}
+	srv.mu.Lock()
+	getCount := srv.fipGetCount
+	srv.mu.Unlock()
+	// 1 pre-delete list + 1 poll (attempt 0, before any sleep) = 2 GET calls.
+	// The sleep before attempt 1 cancels the context, so attempt 1's list call
+	// must never happen.
+	if getCount != 2 {
+		t.Errorf("expected exactly 2 GET calls (no wasted round-trip after cancellation), got %d", getCount)
+	}
+}
+
+// Scenario: FIP disappears during polling → polling succeeds without error
+func TestDeleteFloatingIPs_SlowDeletion_PollingSucceeds(t *testing.T) {
+	srv := newNetworkTestServer(t)
+	fip := fipRecord{ID: "fip-slow", Description: fipDesc("mycluster")}
+	// idx 0: pre-delete list (FIP present)
+	// idx 1: first poll (FIP still present — OpenStack PENDING_DELETE)
+	// idx 2: second poll (FIP gone — deletion complete)
+	srv.fipLists = [][]fipRecord{{fip}, {fip}, {}}
+
+	session := srv.authenticate(t)
+	err := session.DeleteFloatingIPs(context.Background(), logr.Discard(), "mycluster")
+
+	if err != nil {
+		t.Fatalf("expected no error when FIP disappears during polling, got: %v", err)
+	}
+
+	srv.mu.Lock()
+	deletedIDs := srv.deletedFIPs
+	getCount := srv.fipGetCount
+	srv.mu.Unlock()
+
+	if len(deletedIDs) != 1 {
+		t.Errorf("expected 1 FIP deleted, got %d: %v", len(deletedIDs), deletedIDs)
+	}
+	// 1 pre-delete list + 2 polls = 3 GET calls
+	if getCount != 3 {
+		t.Errorf("expected 3 GET calls (1 list + 2 polls), got %d", getCount)
+	}
+}
+
+// Scenario: FIP already gone on the first verification check → no wait incurred
+func TestDeleteFloatingIPs_ImmediateVerification_NoSleep(t *testing.T) {
+	srv := newNetworkTestServer(t)
+	fip := fipRecord{ID: "fip-fast", Description: fipDesc("mycluster")}
+	srv.fipLists = [][]fipRecord{{fip}, {}} // gone by the first verification check
+
+	session := srv.authenticate(t)
+	var sleepCalls int
+	session.SleepFunc = func(d time.Duration) { sleepCalls++ }
+	err := session.DeleteFloatingIPs(context.Background(), logr.Discard(), "mycluster")
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if sleepCalls != 0 {
+		t.Errorf("expected no sleep when the resource is already gone, got %d sleep calls", sleepCalls)
+	}
+}
+
+// Scenario: No matching FIP → no deletion, no verification
+func TestDeleteFloatingIPs_NothingToDelete_NoVerification(t *testing.T) {
+	srv := newNetworkTestServer(t)
+	srv.fipLists = [][]fipRecord{{}} // empty list
+
+	session := srv.authenticate(t)
+	if err := session.DeleteFloatingIPs(context.Background(), logr.Discard(), "mycluster"); err != nil {
+		t.Fatalf("unexpected error with no FIPs: %v", err)
+	}
+
+	srv.mu.Lock()
+	deletedCount := len(srv.deletedFIPs)
+	getCount := srv.fipGetCount
+	srv.mu.Unlock()
+
+	if deletedCount != 0 {
+		t.Errorf("expected no DELETE calls, got %d: %v", deletedCount, srv.deletedFIPs)
+	}
+	// No verification GET should be triggered when nothing was found
+	if getCount != 1 {
+		t.Errorf("expected exactly 1 GET call (no verification), got %d", getCount)
+	}
+}
+
+// Scenario: Pas d'endpoint "network" dans le catalogue → CatalogError
+func TestDeleteFloatingIPs_NoNetworkEndpoint_ReturnsCatalogError(t *testing.T) {
+	// Use a Keystone server that only advertises a "compute" endpoint (no "network")
+	ks := newKeystoneServer(t)
+	ks.catalog = catalogWith(
+		serviceEntry("compute",
+			endpoint("public", "RegionOne", "http://compute.example.com"),
+		),
+	)
+
+	clouds := buildCloudsYAML(ks.URL, "v3applicationcredential")
+	session, err := openstack.Authenticate(context.Background(), clouds, "openstack", "")
+	if err != nil {
+		t.Fatalf("unexpected authenticate error: %v", err)
+	}
+
+	err = session.DeleteFloatingIPs(context.Background(), logr.Discard(), "mycluster")
+
+	if err == nil {
+		t.Fatal("expected CatalogError when network endpoint is absent")
+	}
+	var target *openstack.CatalogError
+	if !errorAs(err, &target) {
+		t.Errorf("expected *CatalogError, got %T: %v", err, err)
+	}
+}
+
+// ── Epic 3: Octavia Load Balancer Cleanup ─────────────────────────────────────
+
+// ── US3.1: Identify Kubernetes Load Balancers ─────────────────────────────────
+
+// Scenario: LB belonging to the cluster → included in deletion
+// Scenario: LB from another cluster → excluded
+// Scenario: LB without kube_service prefix → excluded
+func TestDeleteLoadBalancers_Filtering(t *testing.T) {
+	tests := []struct {
+		name         string
+		lbName       string
+		cluster      string
+		shouldDelete bool
+	}{
+		{
+			name:         "matching cluster",
+			lbName:       lbKubeName("mycluster", "api"),
+			cluster:      "mycluster",
+			shouldDelete: true,
+		},
+		{
+			name:         "different cluster",
+			lbName:       lbKubeName("othercluster", "api"),
+			cluster:      "mycluster",
+			shouldDelete: false,
+		},
+		{
+			name:         "wrong prefix",
+			lbName:       "fake_service_mycluster_api",
+			cluster:      "mycluster",
+			shouldDelete: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := newLBTestServer(t)
+			lb := lbRecord{ID: "lb-001", Name: tt.lbName}
+			srv.lbLists = [][]lbRecord{{lb}, {}}
+
+			session := srv.authenticate(t)
+			if err := session.DeleteLoadBalancers(context.Background(), logr.Discard(), tt.cluster); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			srv.mu.Lock()
+			deleted := len(srv.deletedLBs) > 0
+			srv.mu.Unlock()
+
+			if deleted != tt.shouldDelete {
+				t.Errorf("shouldDelete=%v but LB was deleted=%v", tt.shouldDelete, deleted)
+			}
+		})
+	}
+}
+
+// ── US3.2: HTTP error during listing (PR #261) ───────────────────────────────
+
+// Scenario: HTTP error during LB listing → ERROR log, no exception
+func TestDeleteLoadBalancers_ListError_LogsAndSkips(t *testing.T) {
+	srv := newLBTestServer(t)
+	srv.listStatusOverride = http.StatusInternalServerError
+
+	session := srv.authenticate(t)
+	err := session.DeleteLoadBalancers(context.Background(), logr.Discard(), "mycluster")
+
+	if err != nil {
+		t.Fatalf("expected nil when list returns HTTP 500, got: %v", err)
+	}
+	srv.mu.Lock()
+	deleted := len(srv.deletedLBs)
+	srv.mu.Unlock()
+	if deleted != 0 {
+		t.Errorf("expected no DELETE calls when list fails, got %d", deleted)
+	}
+}
+
+// Scenario: HTTP error while verifying LB deletion after polling → ERROR log, no exception
+// (unlike other resource types, LB verification failures are non-fatal: Octavia
+// listing is known to be slower/less reliable, see PR #261.)
+func TestDeleteLoadBalancers_VerificationListError_LogsAndSucceeds(t *testing.T) {
+	srv := newLBTestServer(t)
+	lb := lbRecord{ID: "lb-001", Name: lbKubeName("mycluster", "svc")}
+	srv.lbLists = [][]lbRecord{{lb}}
+	srv.listStatusOverride = http.StatusInternalServerError
+	srv.listFailFrom = 2 // pre-delete list (call 1) succeeds; verification (call 2+) fails
+
+	session := srv.authenticate(t)
+	err := session.DeleteLoadBalancers(context.Background(), logr.Discard(), "mycluster")
+
+	if err != nil {
+		t.Fatalf("expected nil when verification list fails after deletion, got: %v", err)
+	}
+	srv.mu.Lock()
+	deleted := len(srv.deletedLBs)
+	srv.mu.Unlock()
+	if deleted != 1 {
+		t.Errorf("expected the LB delete to have been attempted, got %d DELETE calls", deleted)
+	}
+}
+
+// ── US3.3: Delete Load Balancers with cascade ─────────────────────────────────
+
+// Scenario: Successful deletion with cascade=true
+func TestDeleteLoadBalancers_SuccessfulDeletion(t *testing.T) {
+	srv := newLBTestServer(t)
+	lbs := []lbRecord{
+		{ID: "lb-001", Name: lbKubeName("mycluster", "svc1")},
+		{ID: "lb-002", Name: lbKubeName("mycluster", "svc2")},
+	}
+	srv.lbLists = [][]lbRecord{lbs, {}}
+
+	session := srv.authenticate(t)
+	if err := session.DeleteLoadBalancers(context.Background(), logr.Discard(), "mycluster"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	srv.mu.Lock()
+	deletedIDs := srv.deletedLBs
+	srv.mu.Unlock()
+
+	if len(deletedIDs) != 2 {
+		t.Errorf("expected 2 LBs deleted, got %d: %v", len(deletedIDs), deletedIDs)
+	}
+	idSet := make(map[string]bool)
+	for _, id := range deletedIDs {
+		idSet[id] = true
+	}
+	for _, lb := range lbs {
+		if !idSet[lb.ID] {
+			t.Errorf("expected LB %s to be deleted", lb.ID)
+		}
+	}
+}
+
+// Scenario: DELETE issued with cascade=true
+func TestDeleteLoadBalancers_CascadeDelete(t *testing.T) {
+	srv := newLBTestServer(t)
+	srv.lbLists = [][]lbRecord{
+		{{ID: "lb-cascade", Name: lbKubeName("mycluster", "svc")}},
+		{},
+	}
+
+	session := srv.authenticate(t)
+	if err := session.DeleteLoadBalancers(context.Background(), logr.Discard(), "mycluster"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	srv.mu.Lock()
+	cascades := srv.deleteCascade
+	srv.mu.Unlock()
+
+	if len(cascades) == 0 {
+		t.Fatal("expected a DELETE call, got none")
+	}
+	for i, c := range cascades {
+		if c != "true" {
+			t.Errorf("DELETE call %d: expected cascade=true, got %q", i, c)
+		}
+	}
+}
+
+// Scenario: HTTP 400 error during deletion → warning, continues, verification triggered
+func TestDeleteLoadBalancers_TransientError400_ContinuesAndVerifies(t *testing.T) {
+	srv := newLBTestServer(t)
+	lbs := []lbRecord{
+		{ID: "lb-001", Name: lbKubeName("mycluster", "svc1")}, // returns HTTP 400
+		{ID: "lb-002", Name: lbKubeName("mycluster", "svc2")}, // returns HTTP 204
+	}
+	srv.lbLists = [][]lbRecord{lbs, {}}
+	srv.deleteStatus["lb-001"] = http.StatusBadRequest
+
+	session := srv.authenticate(t)
+	err := session.DeleteLoadBalancers(context.Background(), logr.Discard(), "mycluster")
+
+	if err != nil {
+		t.Fatalf("expected no error for transient HTTP 400, got: %v", err)
+	}
+
+	srv.mu.Lock()
+	attempted := len(srv.deletedLBs)
+	getCount := srv.lbGetCount
+	srv.mu.Unlock()
+
+	if attempted != 2 {
+		t.Errorf("expected both LBs to be attempted, got %d DELETE calls", attempted)
+	}
+	if getCount < 2 {
+		t.Errorf("expected at least 2 GET calls (list + verification), got %d", getCount)
+	}
+}
+
+// Scenario: HTTP 500 error → exception propagated
+func TestDeleteLoadBalancers_HTTP500_PropagatesError(t *testing.T) {
+	srv := newLBTestServer(t)
+	srv.lbLists = [][]lbRecord{
+		{{ID: "lb-server-error", Name: lbKubeName("mycluster", "svc")}},
+	}
+	srv.deleteStatus["lb-server-error"] = http.StatusInternalServerError
+
+	session := srv.authenticate(t)
+	err := session.DeleteLoadBalancers(context.Background(), logr.Discard(), "mycluster")
+
+	if err == nil {
+		t.Fatal("expected error for HTTP 500, got nil")
+	}
+}
+
+// Scenario: LBs still present after deletion → error returned
+func TestDeleteLoadBalancers_StillPresentAfterDeletion_ReturnsError(t *testing.T) {
+	srv := newLBTestServer(t)
+	lb := lbRecord{ID: "lb-persistent", Name: lbKubeName("mycluster", "svc")}
+	srv.lbLists = [][]lbRecord{{lb}, {lb}}
+
+	session := srv.authenticate(t)
+	err := session.DeleteLoadBalancers(context.Background(), logr.Discard(), "mycluster")
+
+	if err == nil {
+		t.Fatal("expected error when LB persists after deletion")
+	}
+	if !strings.Contains(err.Error(), "mycluster") {
+		t.Errorf("expected error to mention cluster name, got: %v", err)
+	}
+}
+
+// Scenario: No matching LB → no deletion, no verification
+func TestDeleteLoadBalancers_NothingToDelete_NoVerification(t *testing.T) {
+	srv := newLBTestServer(t)
+	srv.lbLists = [][]lbRecord{{}}
+
+	session := srv.authenticate(t)
+	if err := session.DeleteLoadBalancers(context.Background(), logr.Discard(), "mycluster"); err != nil {
+		t.Fatalf("unexpected error with no LBs: %v", err)
+	}
+
+	srv.mu.Lock()
+	deletedCount := len(srv.deletedLBs)
+	getCount := srv.lbGetCount
+	srv.mu.Unlock()
+
+	if deletedCount != 0 {
+		t.Errorf("expected no DELETE calls, got %d: %v", deletedCount, srv.deletedLBs)
+	}
+	if getCount != 1 {
+		t.Errorf("expected exactly 1 GET call (no verification), got %d", getCount)
+	}
+}
+
+// ── SG mock server ────────────────────────────────────────────────────────────
+
+type sgRecord struct {
+	ID          string `json:"id"`
+	Description string `json:"description"`
+}
+
+// sgTestServer is a mock OpenStack server that handles Keystone auth +
+// a Neutron-like security group API. The catalog advertises the server's own
+// URL as the "network" endpoint.
+type sgTestServer struct {
+	*httptest.Server
+	mu                 sync.Mutex
+	sgLists            [][]sgRecord
+	sgGetCount         int
+	listStatusOverride int // if non-zero, all GETs return this status
+	deleteStatus       map[string]int
+	deletedSGs         []string
+}
+
+func newSGTestServer(t *testing.T) *sgTestServer {
+	t.Helper()
+	srv := &sgTestServer{
+		deleteStatus: make(map[string]int),
+	}
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/v3/auth/tokens", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("X-Subject-Token", "test-sg-token")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"token": map[string]any{"user": map[string]any{"id": "test-user"}},
+		})
+	})
+
+	// Self-referential catalog: "network" endpoint = this server.
+	mux.HandleFunc("/v3/auth/catalog", func(w http.ResponseWriter, r *http.Request) {
+		selfURL := "http://" + r.Host
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"catalog": []any{
+				map[string]any{
+					"type": "network",
+					"endpoints": []any{
+						map[string]any{
+							"interface": "public",
+							"region_id": "RegionOne",
+							"url":       selfURL,
+						},
+					},
+				},
+			},
+		})
+	})
+
+	mux.HandleFunc("/v2.0/security-groups", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		srv.mu.Lock()
+		override := srv.listStatusOverride
+		srv.sgGetCount++
+		idx := srv.sgGetCount - 1
+		var list []sgRecord
+		if len(srv.sgLists) > 0 {
+			if idx < len(srv.sgLists) {
+				list = srv.sgLists[idx]
+			} else {
+				list = srv.sgLists[len(srv.sgLists)-1]
+			}
+		}
+		srv.mu.Unlock()
+		if override != 0 {
+			w.WriteHeader(override)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"security_groups": list})
+	})
+
+	mux.HandleFunc("/v2.0/security-groups/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		id := strings.TrimPrefix(r.URL.Path, "/v2.0/security-groups/")
+		srv.mu.Lock()
+		srv.deletedSGs = append(srv.deletedSGs, id)
+		status, ok := srv.deleteStatus[id]
+		if !ok {
+			status = http.StatusNoContent
+		}
+		srv.mu.Unlock()
+		w.WriteHeader(status)
+	})
+
+	srv.Server = httptest.NewServer(mux)
+	t.Cleanup(srv.Server.Close)
+	return srv
+}
+
+func (srv *sgTestServer) authenticate(t *testing.T) *openstack.Session {
+	t.Helper()
+	cloudsYAML := fmt.Sprintf(`
+clouds:
+  openstack:
+    auth_type: v3applicationcredential
+    auth:
+      auth_url: %s
+      application_credential_id: test-id
+      application_credential_secret: test-secret
+    interface: public
+    region_name: RegionOne
+`, srv.URL)
+	session, err := openstack.Authenticate(context.Background(), cloudsYAML, "openstack", "")
+	if err != nil {
+		t.Fatalf("authenticate: %v", err)
+	}
+	if !session.IsAuthenticated() {
+		t.Fatal("expected authenticated session with network endpoint")
+	}
+	session.SleepFunc = func(d time.Duration) {}
+	return session
+}
+
+func sgDesc(cluster string) string {
+	return fmt.Sprintf("Security Group for Service LoadBalancer in cluster %s", cluster)
+}
+
+// Scenario: No "load-balancer" endpoint in catalog → return nil (LBs skipped)
+func TestDeleteLoadBalancers_NoLoadBalancerEndpoint_Skips(t *testing.T) {
+	ks := newKeystoneServer(t)
+	ks.catalog = catalogWith(
+		serviceEntry("network",
+			endpoint("public", "RegionOne", "http://network.example.com"),
+		),
+	)
+
+	clouds := buildCloudsYAML(ks.URL, "v3applicationcredential")
+	session, err := openstack.Authenticate(context.Background(), clouds, "openstack", "")
+	if err != nil {
+		t.Fatalf("unexpected authenticate error: %v", err)
+	}
+
+	err = session.DeleteLoadBalancers(context.Background(), logr.Discard(), "mycluster")
+	if err != nil {
+		t.Fatalf("expected nil when load-balancer endpoint is absent, got: %v", err)
+	}
+}
+
+// ── Epic 4: Security Group Cleanup ───────────────────────────────────────────
+
+// ── US4.1: Identify Security Groups of a cluster ─────────────────────────────
+
+// Scenario: SG belonging to the cluster → included in deletion
+// Scenario: SG from another cluster → excluded
+// Scenario: Non-matching description → excluded
+func TestDeleteSecurityGroups_Filtering(t *testing.T) {
+	tests := []struct {
+		name         string
+		description  string
+		cluster      string
+		shouldDelete bool
+	}{
+		{
+			name:         "matching cluster",
+			description:  sgDesc("mycluster"),
+			cluster:      "mycluster",
+			shouldDelete: true,
+		},
+		{
+			name:         "different cluster",
+			description:  sgDesc("othercluster"),
+			cluster:      "mycluster",
+			shouldDelete: false,
+		},
+		{
+			name:         "wrong prefix",
+			description:  "Group for Service LoadBalancer in cluster mycluster",
+			cluster:      "mycluster",
+			shouldDelete: false,
+		},
+		{
+			name:         "unrelated description",
+			description:  "Some other security group",
+			cluster:      "mycluster",
+			shouldDelete: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := newSGTestServer(t)
+			sg := sgRecord{ID: "sg-001", Description: tt.description}
+			srv.sgLists = [][]sgRecord{{sg}, {}}
+
+			session := srv.authenticate(t)
+			if err := session.DeleteSecurityGroups(context.Background(), logr.Discard(), tt.cluster); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			srv.mu.Lock()
+			deleted := len(srv.deletedSGs) > 0
+			srv.mu.Unlock()
+
+			if deleted != tt.shouldDelete {
+				t.Errorf("shouldDelete=%v but SG was deleted=%v", tt.shouldDelete, deleted)
+			}
+		})
+	}
+}
+
+// ── US4.2: Delete Security Groups ────────────────────────────────────────────
+
+// Scenario: Successful deletion
+func TestDeleteSecurityGroups_SuccessfulDeletion(t *testing.T) {
+	srv := newSGTestServer(t)
+	sgs := []sgRecord{
+		{ID: "sg-001", Description: sgDesc("mycluster")},
+		{ID: "sg-002", Description: sgDesc("mycluster")},
+	}
+	srv.sgLists = [][]sgRecord{sgs, {}}
+
+	session := srv.authenticate(t)
+	if err := session.DeleteSecurityGroups(context.Background(), logr.Discard(), "mycluster"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	srv.mu.Lock()
+	deletedIDs := srv.deletedSGs
+	srv.mu.Unlock()
+
+	if len(deletedIDs) != 2 {
+		t.Errorf("expected 2 SGs deleted, got %d: %v", len(deletedIDs), deletedIDs)
+	}
+	idSet := make(map[string]bool)
+	for _, id := range deletedIDs {
+		idSet[id] = true
+	}
+	for _, sg := range sgs {
+		if !idSet[sg.ID] {
+			t.Errorf("expected SG %s to be deleted", sg.ID)
+		}
+	}
+}
+
+// Scenario: SG still in use (HTTP 409) → warning, continues, verification triggered
+func TestDeleteSecurityGroups_TransientError409_ContinuesAndVerifies(t *testing.T) {
+	srv := newSGTestServer(t)
+	sgs := []sgRecord{
+		{ID: "sg-001", Description: sgDesc("mycluster")}, // returns HTTP 409
+		{ID: "sg-002", Description: sgDesc("mycluster")}, // returns HTTP 204
+	}
+	srv.sgLists = [][]sgRecord{sgs, {}}
+	srv.deleteStatus["sg-001"] = http.StatusConflict
+
+	session := srv.authenticate(t)
+	err := session.DeleteSecurityGroups(context.Background(), logr.Discard(), "mycluster")
+
+	if err != nil {
+		t.Fatalf("expected no error for transient HTTP 409, got: %v", err)
+	}
+
+	srv.mu.Lock()
+	attempted := len(srv.deletedSGs)
+	getCount := srv.sgGetCount
+	srv.mu.Unlock()
+
+	if attempted != 2 {
+		t.Errorf("expected both SGs to be attempted, got %d DELETE calls", attempted)
+	}
+	// Verification GET must have been triggered (deleted=true even on transient error)
+	if getCount < 2 {
+		t.Errorf("expected at least 2 GET calls (list + verification), got %d", getCount)
+	}
+}
+
+// Scenario: HTTP 500 error → exception propagated
+func TestDeleteSecurityGroups_HTTP500_PropagatesError(t *testing.T) {
+	srv := newSGTestServer(t)
+	srv.sgLists = [][]sgRecord{
+		{{ID: "sg-server-error", Description: sgDesc("mycluster")}},
+	}
+	srv.deleteStatus["sg-server-error"] = http.StatusInternalServerError
+
+	session := srv.authenticate(t)
+	err := session.DeleteSecurityGroups(context.Background(), logr.Discard(), "mycluster")
+
+	if err == nil {
+		t.Fatal("expected error for HTTP 500, got nil")
+	}
+}
+
+// Scenario: SGs still present after deletion → error returned
+func TestDeleteSecurityGroups_StillPresentAfterDeletion_ReturnsError(t *testing.T) {
+	srv := newSGTestServer(t)
+	sg := sgRecord{ID: "sg-persistent", Description: sgDesc("mycluster")}
+	srv.sgLists = [][]sgRecord{{sg}, {sg}}
+
+	session := srv.authenticate(t)
+	err := session.DeleteSecurityGroups(context.Background(), logr.Discard(), "mycluster")
+
+	if err == nil {
+		t.Fatal("expected error when SG persists after deletion")
+	}
+	if !strings.Contains(err.Error(), "mycluster") {
+		t.Errorf("expected error to mention cluster name, got: %v", err)
+	}
+}
+
+// Scenario: No matching SG → no deletion, no verification
+func TestDeleteSecurityGroups_NothingToDelete_NoVerification(t *testing.T) {
+	srv := newSGTestServer(t)
+	srv.sgLists = [][]sgRecord{{}}
+
+	session := srv.authenticate(t)
+	if err := session.DeleteSecurityGroups(context.Background(), logr.Discard(), "mycluster"); err != nil {
+		t.Fatalf("unexpected error with no SGs: %v", err)
+	}
+
+	srv.mu.Lock()
+	deletedCount := len(srv.deletedSGs)
+	getCount := srv.sgGetCount
+	srv.mu.Unlock()
+
+	if deletedCount != 0 {
+		t.Errorf("expected no DELETE calls, got %d: %v", deletedCount, srv.deletedSGs)
+	}
+	if getCount != 1 {
+		t.Errorf("expected exactly 1 GET call (no verification), got %d", getCount)
+	}
+}
+
+// ── Cinder Volume mock server ─────────────────────────────────────────────────
+
+type cinderVolumeRecord struct {
+	ID       string            `json:"id"`
+	Metadata map[string]string `json:"metadata"`
+}
+
+// cinderTestServer is a mock OpenStack server that handles Keystone auth +
+// a Cinder-like volumes API. The catalog advertises the server's own URL as
+// the "volumev3" endpoint (first type checked by cinderEndpoint).
+type cinderTestServer struct {
+	*httptest.Server
+	mu             sync.Mutex
+	volumeLists    [][]cinderVolumeRecord // sequence of list responses; last entry is reused
+	volumeGetCount int
+	deleteStatus   map[string]int
+	deletedVolumes []string
+}
+
+func newCinderTestServer(t *testing.T) *cinderTestServer {
+	t.Helper()
+	srv := &cinderTestServer{
+		deleteStatus: make(map[string]int),
+	}
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/v3/auth/tokens", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("X-Subject-Token", "test-cinder-token")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"token": map[string]any{"user": map[string]any{"id": "test-user"}},
+		})
+	})
+
+	// Self-referential catalog: "volumev3" endpoint = this server.
+	mux.HandleFunc("/v3/auth/catalog", func(w http.ResponseWriter, r *http.Request) {
+		selfURL := "http://" + r.Host
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"catalog": []any{
+				map[string]any{
+					"type": "volumev3",
+					"endpoints": []any{
+						map[string]any{
+							"interface": "public",
+							"region_id": "RegionOne",
+							"url":       selfURL,
+						},
+					},
+				},
+			},
+		})
+	})
+
+	// Cinder: list volumes (exact path — takes priority over /volumes/ subtree)
+	mux.HandleFunc("/volumes/detail", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		srv.mu.Lock()
+		srv.volumeGetCount++
+		idx := srv.volumeGetCount - 1
+		var list []cinderVolumeRecord
+		if len(srv.volumeLists) > 0 {
+			if idx < len(srv.volumeLists) {
+				list = srv.volumeLists[idx]
+			} else {
+				list = srv.volumeLists[len(srv.volumeLists)-1]
+			}
+		}
+		srv.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"volumes": list})
+	})
+
+	// Cinder: delete volume by ID (subtree pattern handles /volumes/{id})
+	mux.HandleFunc("/volumes/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		id := strings.TrimPrefix(r.URL.Path, "/volumes/")
+		srv.mu.Lock()
+		srv.deletedVolumes = append(srv.deletedVolumes, id)
+		status, ok := srv.deleteStatus[id]
+		if !ok {
+			status = http.StatusNoContent
+		}
+		srv.mu.Unlock()
+		w.WriteHeader(status)
+	})
+
+	srv.Server = httptest.NewServer(mux)
+	t.Cleanup(srv.Server.Close)
+	return srv
+}
+
+func (srv *cinderTestServer) authenticate(t *testing.T) *openstack.Session {
+	t.Helper()
+	cloudsYAML := fmt.Sprintf(`
+clouds:
+  openstack:
+    auth_type: v3applicationcredential
+    auth:
+      auth_url: %s
+      application_credential_id: test-id
+      application_credential_secret: test-secret
+    interface: public
+    region_name: RegionOne
+`, srv.URL)
+	session, err := openstack.Authenticate(context.Background(), cloudsYAML, "openstack", "")
+	if err != nil {
+		t.Fatalf("authenticate: %v", err)
+	}
+	if !session.IsAuthenticated() {
+		t.Fatal("expected authenticated session with volumev3 endpoint")
+	}
+	session.SleepFunc = func(d time.Duration) {}
+	return session
+}
+
+// ── Epic 5: Cinder Volume Management ─────────────────────────────────────────
+
+// ── US5.1: Identify volumes of a cluster ─────────────────────────────────────
+
+// Scenario: Volume from the correct cluster without keep → deleted
+// Scenario: Volume with keep=true → kept
+// Scenario: Volume from another cluster → excluded
+// Scenario: Volume without CSI metadata → excluded
+func TestDeleteVolumes_Filtering(t *testing.T) {
+	tests := []struct {
+		name         string
+		metadata     map[string]string
+		cluster      string
+		shouldDelete bool
+	}{
+		{
+			name:         "matching cluster, no keep",
+			metadata:     map[string]string{"cinder.csi.openstack.org/cluster": "mycluster"},
+			cluster:      "mycluster",
+			shouldDelete: true,
+		},
+		{
+			name: "matching cluster, keep=true",
+			metadata: map[string]string{
+				"cinder.csi.openstack.org/cluster":    "mycluster",
+				"janitor.capi.azimuth-cloud.com/keep": "true",
+			},
+			cluster:      "mycluster",
+			shouldDelete: false,
+		},
+		{
+			name:         "different cluster",
+			metadata:     map[string]string{"cinder.csi.openstack.org/cluster": "othercluster"},
+			cluster:      "mycluster",
+			shouldDelete: false,
+		},
+		{
+			name:         "no CSI metadata",
+			metadata:     map[string]string{},
+			cluster:      "mycluster",
+			shouldDelete: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := newCinderTestServer(t)
+			vol := cinderVolumeRecord{ID: "vol-001", Metadata: tt.metadata}
+			srv.volumeLists = [][]cinderVolumeRecord{{vol}, {}}
+
+			session := srv.authenticate(t)
+			if err := session.DeleteVolumes(context.Background(), logr.Discard(), tt.cluster); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			srv.mu.Lock()
+			deleted := len(srv.deletedVolumes) > 0
+			srv.mu.Unlock()
+
+			if deleted != tt.shouldDelete {
+				t.Errorf("shouldDelete=%v but volume was deleted=%v", tt.shouldDelete, deleted)
+			}
+		})
+	}
+}
+
+// Scenario: Successful deletion of multiple volumes
+func TestDeleteVolumes_SuccessfulDeletion(t *testing.T) {
+	srv := newCinderTestServer(t)
+	vols := []cinderVolumeRecord{
+		{ID: "vol-001", Metadata: map[string]string{"cinder.csi.openstack.org/cluster": "mycluster"}},
+		{ID: "vol-002", Metadata: map[string]string{"cinder.csi.openstack.org/cluster": "mycluster"}},
+	}
+	srv.volumeLists = [][]cinderVolumeRecord{vols, {}}
+
+	session := srv.authenticate(t)
+	if err := session.DeleteVolumes(context.Background(), logr.Discard(), "mycluster"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	srv.mu.Lock()
+	deletedIDs := srv.deletedVolumes
+	srv.mu.Unlock()
+
+	if len(deletedIDs) != 2 {
+		t.Errorf("expected 2 volumes deleted, got %d: %v", len(deletedIDs), deletedIDs)
+	}
+	idSet := make(map[string]bool)
+	for _, id := range deletedIDs {
+		idSet[id] = true
+	}
+	for _, vol := range vols {
+		if !idSet[vol.ID] {
+			t.Errorf("expected volume %s to be deleted", vol.ID)
+		}
+	}
+}
+
+// Scenario: Transient HTTP 409 error → warning, continues, verification triggered
+func TestDeleteVolumes_TransientError409_ContinuesAndVerifies(t *testing.T) {
+	srv := newCinderTestServer(t)
+	vols := []cinderVolumeRecord{
+		{ID: "vol-001", Metadata: map[string]string{"cinder.csi.openstack.org/cluster": "mycluster"}},
+		{ID: "vol-002", Metadata: map[string]string{"cinder.csi.openstack.org/cluster": "mycluster"}},
+	}
+	srv.volumeLists = [][]cinderVolumeRecord{vols, {}}
+	srv.deleteStatus["vol-001"] = http.StatusConflict
+
+	session := srv.authenticate(t)
+	err := session.DeleteVolumes(context.Background(), logr.Discard(), "mycluster")
+
+	if err != nil {
+		t.Fatalf("expected no error for transient HTTP 409, got: %v", err)
+	}
+
+	srv.mu.Lock()
+	attempted := len(srv.deletedVolumes)
+	getCount := srv.volumeGetCount
+	srv.mu.Unlock()
+
+	if attempted != 2 {
+		t.Errorf("expected both volumes to be attempted, got %d DELETE calls", attempted)
+	}
+	if getCount < 2 {
+		t.Errorf("expected at least 2 GET calls (list + verification), got %d", getCount)
+	}
+}
+
+// Scenario: HTTP 500 error → exception propagated
+func TestDeleteVolumes_HTTP500_PropagatesError(t *testing.T) {
+	srv := newCinderTestServer(t)
+	srv.volumeLists = [][]cinderVolumeRecord{
+		{{ID: "vol-server-error", Metadata: map[string]string{"cinder.csi.openstack.org/cluster": "mycluster"}}},
+	}
+	srv.deleteStatus["vol-server-error"] = http.StatusInternalServerError
+
+	session := srv.authenticate(t)
+	err := session.DeleteVolumes(context.Background(), logr.Discard(), "mycluster")
+
+	if err == nil {
+		t.Fatal("expected error for HTTP 500, got nil")
+	}
+}
+
+// Scenario: Volume still present after deletion → error returned
+func TestDeleteVolumes_StillPresentAfterDeletion_ReturnsError(t *testing.T) {
+	srv := newCinderTestServer(t)
+	vol := cinderVolumeRecord{
+		ID:       "vol-persistent",
+		Metadata: map[string]string{"cinder.csi.openstack.org/cluster": "mycluster"},
+	}
+	srv.volumeLists = [][]cinderVolumeRecord{{vol}, {vol}}
+
+	session := srv.authenticate(t)
+	err := session.DeleteVolumes(context.Background(), logr.Discard(), "mycluster")
+
+	if err == nil {
+		t.Fatal("expected error when volume persists after deletion")
+	}
+	if !strings.Contains(err.Error(), "mycluster") {
+		t.Errorf("expected error to mention cluster name, got: %v", err)
+	}
+}
+
+// Scenario: No matching volume → no deletion, no verification
+func TestDeleteVolumes_NothingToDelete_NoVerification(t *testing.T) {
+	srv := newCinderTestServer(t)
+	srv.volumeLists = [][]cinderVolumeRecord{{}}
+
+	session := srv.authenticate(t)
+	if err := session.DeleteVolumes(context.Background(), logr.Discard(), "mycluster"); err != nil {
+		t.Fatalf("unexpected error with no volumes: %v", err)
+	}
+
+	srv.mu.Lock()
+	deletedCount := len(srv.deletedVolumes)
+	getCount := srv.volumeGetCount
+	srv.mu.Unlock()
+
+	if deletedCount != 0 {
+		t.Errorf("expected no DELETE calls, got %d: %v", deletedCount, srv.deletedVolumes)
+	}
+	if getCount != 1 {
+		t.Errorf("expected exactly 1 GET call (no verification), got %d", getCount)
+	}
+}
+
+// ── Cinder Snapshot mock server ───────────────────────────────────────────────
+
+// snapshotTestServer is a mock OpenStack server handling Keystone auth +
+// a Cinder-like snapshots API. Catalog advertises the server's own URL as
+// the "volumev3" endpoint (same as volumes — same Cinder service).
+type snapshotTestServer struct {
+	*httptest.Server
+	mu               sync.Mutex
+	snapshotLists    [][]cinderVolumeRecord // reuse volumeItem shape (id + metadata)
+	snapshotGetCount int
+	deleteStatus     map[string]int
+	deletedSnapshots []string
+}
+
+func newSnapshotTestServer(t *testing.T) *snapshotTestServer {
+	t.Helper()
+	srv := &snapshotTestServer{
+		deleteStatus: make(map[string]int),
+	}
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/v3/auth/tokens", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("X-Subject-Token", "test-snapshot-token")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"token": map[string]any{"user": map[string]any{"id": "test-user"}},
+		})
+	})
+
+	mux.HandleFunc("/v3/auth/catalog", func(w http.ResponseWriter, r *http.Request) {
+		selfURL := "http://" + r.Host
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"catalog": []any{
+				map[string]any{
+					"type": "volumev3",
+					"endpoints": []any{
+						map[string]any{
+							"interface": "public",
+							"region_id": "RegionOne",
+							"url":       selfURL,
+						},
+					},
+				},
+			},
+		})
+	})
+
+	// Cinder: list snapshots (exact path — takes priority over /snapshots/ subtree)
+	mux.HandleFunc("/snapshots/detail", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		srv.mu.Lock()
+		srv.snapshotGetCount++
+		idx := srv.snapshotGetCount - 1
+		var list []cinderVolumeRecord
+		if len(srv.snapshotLists) > 0 {
+			if idx < len(srv.snapshotLists) {
+				list = srv.snapshotLists[idx]
+			} else {
+				list = srv.snapshotLists[len(srv.snapshotLists)-1]
+			}
+		}
+		srv.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"snapshots": list})
+	})
+
+	// Cinder: delete snapshot by ID (subtree pattern handles /snapshots/{id})
+	mux.HandleFunc("/snapshots/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		id := strings.TrimPrefix(r.URL.Path, "/snapshots/")
+		srv.mu.Lock()
+		srv.deletedSnapshots = append(srv.deletedSnapshots, id)
+		status, ok := srv.deleteStatus[id]
+		if !ok {
+			status = http.StatusNoContent
+		}
+		srv.mu.Unlock()
+		w.WriteHeader(status)
+	})
+
+	srv.Server = httptest.NewServer(mux)
+	t.Cleanup(srv.Server.Close)
+	return srv
+}
+
+func (srv *snapshotTestServer) authenticate(t *testing.T) *openstack.Session {
+	t.Helper()
+	cloudsYAML := fmt.Sprintf(`
+clouds:
+  openstack:
+    auth_type: v3applicationcredential
+    auth:
+      auth_url: %s
+      application_credential_id: test-id
+      application_credential_secret: test-secret
+    interface: public
+    region_name: RegionOne
+`, srv.URL)
+	session, err := openstack.Authenticate(context.Background(), cloudsYAML, "openstack", "")
+	if err != nil {
+		t.Fatalf("authenticate: %v", err)
+	}
+	if !session.IsAuthenticated() {
+		t.Fatal("expected authenticated session with volumev3 endpoint")
+	}
+	session.SleepFunc = func(d time.Duration) {}
+	return session
+}
+
+// ── Epic 6: Cinder Snapshot Management ───────────────────────────────────────
+
+// ── US6.1: Identify and delete snapshots of a cluster ────────────────────────
+
+// Scenario: Snapshot from the correct cluster → deleted
+// Scenario: Snapshot from another cluster → excluded
+func TestDeleteSnapshots_Filtering(t *testing.T) {
+	tests := []struct {
+		name         string
+		metadata     map[string]string
+		cluster      string
+		shouldDelete bool
+	}{
+		{
+			name:         "matching cluster",
+			metadata:     map[string]string{"cinder.csi.openstack.org/cluster": "mycluster"},
+			cluster:      "mycluster",
+			shouldDelete: true,
+		},
+		{
+			name:         "different cluster",
+			metadata:     map[string]string{"cinder.csi.openstack.org/cluster": "othercluster"},
+			cluster:      "mycluster",
+			shouldDelete: false,
+		},
+		{
+			name:         "no CSI metadata",
+			metadata:     map[string]string{},
+			cluster:      "mycluster",
+			shouldDelete: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := newSnapshotTestServer(t)
+			snap := cinderVolumeRecord{ID: "snap-001", Metadata: tt.metadata}
+			srv.snapshotLists = [][]cinderVolumeRecord{{snap}, {}}
+
+			session := srv.authenticate(t)
+			if err := session.DeleteSnapshots(context.Background(), logr.Discard(), tt.cluster); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			srv.mu.Lock()
+			deleted := len(srv.deletedSnapshots) > 0
+			srv.mu.Unlock()
+
+			if deleted != tt.shouldDelete {
+				t.Errorf("shouldDelete=%v but snapshot was deleted=%v", tt.shouldDelete, deleted)
+			}
+		})
+	}
+}
+
+// Scenario: Successful deletion of multiple snapshots
+func TestDeleteSnapshots_SuccessfulDeletion(t *testing.T) {
+	srv := newSnapshotTestServer(t)
+	snaps := []cinderVolumeRecord{
+		{ID: "snap-001", Metadata: map[string]string{"cinder.csi.openstack.org/cluster": "mycluster"}},
+		{ID: "snap-002", Metadata: map[string]string{"cinder.csi.openstack.org/cluster": "mycluster"}},
+	}
+	srv.snapshotLists = [][]cinderVolumeRecord{snaps, {}}
+
+	session := srv.authenticate(t)
+	if err := session.DeleteSnapshots(context.Background(), logr.Discard(), "mycluster"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	srv.mu.Lock()
+	deletedIDs := srv.deletedSnapshots
+	srv.mu.Unlock()
+
+	if len(deletedIDs) != 2 {
+		t.Errorf("expected 2 snapshots deleted, got %d: %v", len(deletedIDs), deletedIDs)
+	}
+	idSet := make(map[string]bool)
+	for _, id := range deletedIDs {
+		idSet[id] = true
+	}
+	for _, snap := range snaps {
+		if !idSet[snap.ID] {
+			t.Errorf("expected snapshot %s to be deleted", snap.ID)
+		}
+	}
+}
+
+// Scenario: Transient HTTP 409 error → warning, continues, verification triggered
+func TestDeleteSnapshots_TransientError409_ContinuesAndVerifies(t *testing.T) {
+	srv := newSnapshotTestServer(t)
+	snaps := []cinderVolumeRecord{
+		{ID: "snap-001", Metadata: map[string]string{"cinder.csi.openstack.org/cluster": "mycluster"}},
+		{ID: "snap-002", Metadata: map[string]string{"cinder.csi.openstack.org/cluster": "mycluster"}},
+	}
+	srv.snapshotLists = [][]cinderVolumeRecord{snaps, {}}
+	srv.deleteStatus["snap-001"] = http.StatusConflict
+
+	session := srv.authenticate(t)
+	err := session.DeleteSnapshots(context.Background(), logr.Discard(), "mycluster")
+
+	if err != nil {
+		t.Fatalf("expected no error for transient HTTP 409, got: %v", err)
+	}
+
+	srv.mu.Lock()
+	attempted := len(srv.deletedSnapshots)
+	getCount := srv.snapshotGetCount
+	srv.mu.Unlock()
+
+	if attempted != 2 {
+		t.Errorf("expected both snapshots to be attempted, got %d DELETE calls", attempted)
+	}
+	if getCount < 2 {
+		t.Errorf("expected at least 2 GET calls (list + verification), got %d", getCount)
+	}
+}
+
+// Scenario: HTTP 500 error → exception propagated
+func TestDeleteSnapshots_HTTP500_PropagatesError(t *testing.T) {
+	srv := newSnapshotTestServer(t)
+	srv.snapshotLists = [][]cinderVolumeRecord{
+		{{ID: "snap-server-error", Metadata: map[string]string{"cinder.csi.openstack.org/cluster": "mycluster"}}},
+	}
+	srv.deleteStatus["snap-server-error"] = http.StatusInternalServerError
+
+	session := srv.authenticate(t)
+	err := session.DeleteSnapshots(context.Background(), logr.Discard(), "mycluster")
+
+	if err == nil {
+		t.Fatal("expected error for HTTP 500, got nil")
+	}
+}
+
+// Scenario: Snapshot still present after deletion → error returned
+func TestDeleteSnapshots_StillPresentAfterDeletion_ReturnsError(t *testing.T) {
+	srv := newSnapshotTestServer(t)
+	snap := cinderVolumeRecord{
+		ID:       "snap-persistent",
+		Metadata: map[string]string{"cinder.csi.openstack.org/cluster": "mycluster"},
+	}
+	srv.snapshotLists = [][]cinderVolumeRecord{{snap}, {snap}}
+
+	session := srv.authenticate(t)
+	err := session.DeleteSnapshots(context.Background(), logr.Discard(), "mycluster")
+
+	if err == nil {
+		t.Fatal("expected error when snapshot persists after deletion")
+	}
+	if !strings.Contains(err.Error(), "mycluster") {
+		t.Errorf("expected error to mention cluster name, got: %v", err)
+	}
+}
+
+// ── Identity (AppCredential) mock server ──────────────────────────────────────
+
+// identityTestServer is a mock OpenStack server handling Keystone auth +
+// the Identity API for application credentials. The catalog advertises the
+// server's own URL as the "identity" endpoint.
+type identityTestServer struct {
+	*httptest.Server
+	mu               sync.Mutex
+	deleteStatus     int // HTTP status for the DELETE request; 0 means 204
+	deletedAppcredID string
+}
+
+func newIdentityTestServer(t *testing.T) *identityTestServer {
+	t.Helper()
+	srv := &identityTestServer{}
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/v3/auth/tokens", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("X-Subject-Token", "test-identity-token")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"token": map[string]any{"user": map[string]any{"id": "test-user"}},
+		})
+	})
+
+	// Self-referential catalog: "identity" endpoint = this server.
+	mux.HandleFunc("/v3/auth/catalog", func(w http.ResponseWriter, r *http.Request) {
+		selfURL := "http://" + r.Host
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"catalog": []any{
+				map[string]any{
+					"type": "identity",
+					"endpoints": []any{
+						map[string]any{
+							"interface": "public",
+							"region_id": "RegionOne",
+							"url":       selfURL,
+						},
+					},
+				},
+			},
+		})
+	})
+
+	// Identity: DELETE /v3/users/{userID}/application_credentials/{appcredID}
+	mux.HandleFunc("/v3/users/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		parts := strings.Split(r.URL.Path, "/application_credentials/")
+		srv.mu.Lock()
+		if len(parts) == 2 {
+			srv.deletedAppcredID = parts[1]
+		}
+		status := srv.deleteStatus
+		if status == 0 {
+			status = http.StatusNoContent
+		}
+		srv.mu.Unlock()
+		w.WriteHeader(status)
+	})
+
+	srv.Server = httptest.NewServer(mux)
+	t.Cleanup(srv.Server.Close)
+	return srv
+}
+
+// authenticate returns both the session and the cloudsYAML used to build it,
+// so the same YAML can be passed to DeleteAppCredential.
+func (srv *identityTestServer) authenticate(t *testing.T) (*openstack.Session, string) {
+	t.Helper()
+	cloudsYAML := fmt.Sprintf(`
+clouds:
+  openstack:
+    auth_type: v3applicationcredential
+    auth:
+      auth_url: %s
+      application_credential_id: test-appcred-id
+      application_credential_secret: test-secret
+    interface: public
+    region_name: RegionOne
+`, srv.URL)
+	session, err := openstack.Authenticate(context.Background(), cloudsYAML, "openstack", "")
+	if err != nil {
+		t.Fatalf("authenticate: %v", err)
+	}
+	if !session.IsAuthenticated() {
+		t.Fatal("expected authenticated session with identity endpoint")
+	}
+	session.SleepFunc = func(d time.Duration) {}
+	return session, cloudsYAML
+}
+
+// ── Epic 7: Application Credential Management ─────────────────────────────────
+
+// ── US7.1: Delete the OpenStack Application Credential ───────────────────────
+
+// Scenario: Deletion authorised → HTTP 204, return nil
+func TestDeleteAppCredential_SuccessfulDeletion(t *testing.T) {
+	srv := newIdentityTestServer(t)
+	session, cloudsYAML := srv.authenticate(t)
+
+	if err := session.DeleteAppCredential(context.Background(), logr.Discard(), cloudsYAML, "openstack"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	srv.mu.Lock()
+	deleted := srv.deletedAppcredID
+	srv.mu.Unlock()
+
+	if deleted != "test-appcred-id" {
+		t.Errorf("expected appcred-id %q to be deleted, got %q", "test-appcred-id", deleted)
+	}
+}
+
+// Scenario: Application Credential already deleted → HTTP 404, return nil
+func TestDeleteAppCredential_AlreadyDeleted_404(t *testing.T) {
+	srv := newIdentityTestServer(t)
+	srv.deleteStatus = http.StatusNotFound
+	session, cloudsYAML := srv.authenticate(t)
+
+	if err := session.DeleteAppCredential(context.Background(), logr.Discard(), cloudsYAML, "openstack"); err != nil {
+		t.Fatalf("expected nil for HTTP 404 (already deleted), got: %v", err)
+	}
+}
+
+// Scenario: Application Credential cannot be deleted (403) → warning, return nil
+func TestDeleteAppCredential_Forbidden_403(t *testing.T) {
+	srv := newIdentityTestServer(t)
+	srv.deleteStatus = http.StatusForbidden
+	session, cloudsYAML := srv.authenticate(t)
+
+	if err := session.DeleteAppCredential(context.Background(), logr.Discard(), cloudsYAML, "openstack"); err != nil {
+		t.Fatalf("expected nil for HTTP 403 (restricted), got: %v", err)
+	}
+}
+
+// Scenario: HTTP 500 error → error propagated
+func TestDeleteAppCredential_HTTP500_PropagatesError(t *testing.T) {
+	srv := newIdentityTestServer(t)
+	srv.deleteStatus = http.StatusInternalServerError
+	session, cloudsYAML := srv.authenticate(t)
+
+	err := session.DeleteAppCredential(context.Background(), logr.Discard(), cloudsYAML, "openstack")
+	if err == nil {
+		t.Fatal("expected error for HTTP 500, got nil")
+	}
+}
+
+// Scenario: Password auth has no application credential → deletion is a no-op
+func TestDeleteAppCredential_PasswordAuth_NoOp(t *testing.T) {
+	srv := newIdentityTestServer(t)
+	session, _ := srv.authenticate(t)
+
+	passwordYAML := fmt.Sprintf(`
+clouds:
+  openstack:
+    auth_type: v3password
+    auth:
+      auth_url: %s
+      username: alice
+      password: s3cret
+      project_id: proj-123
+      user_domain_name: Default
+    interface: public
+    region_name: RegionOne
+`, srv.URL)
+
+	if err := session.DeleteAppCredential(context.Background(), logr.Discard(), passwordYAML, "openstack"); err != nil {
+		t.Fatalf("expected nil for password auth (no appcred), got: %v", err)
+	}
+
+	srv.mu.Lock()
+	deleted := srv.deletedAppcredID
+	srv.mu.Unlock()
+	if deleted != "" {
+		t.Errorf("expected no DELETE call, but appcred %q was deleted", deleted)
+	}
+}
+
+// Scenario: No "identity" endpoint in catalog → CatalogError
+func TestDeleteAppCredential_NoIdentityEndpoint_ReturnsCatalogError(t *testing.T) {
+	ks := newKeystoneServer(t)
+	ks.catalog = catalogWith(
+		serviceEntry("network",
+			endpoint("public", "RegionOne", "http://network.example.com"),
+		),
+	)
+
+	clouds := buildCloudsYAML(ks.URL, "v3applicationcredential")
+	session, err := openstack.Authenticate(context.Background(), clouds, "openstack", "")
+	if err != nil {
+		t.Fatalf("unexpected authenticate error: %v", err)
+	}
+
+	err = session.DeleteAppCredential(context.Background(), logr.Discard(), clouds, "openstack")
+
+	if err == nil {
+		t.Fatal("expected CatalogError when identity endpoint is absent")
+	}
+	var target *openstack.CatalogError
+	if !errorAs(err, &target) {
+		t.Errorf("expected *CatalogError, got %T: %v", err, err)
+	}
+}
+
+// Scenario: No matching snapshot → no deletion, no verification
+func TestDeleteSnapshots_NothingToDelete_NoVerification(t *testing.T) {
+	srv := newSnapshotTestServer(t)
+	srv.snapshotLists = [][]cinderVolumeRecord{{}}
+
+	session := srv.authenticate(t)
+	if err := session.DeleteSnapshots(context.Background(), logr.Discard(), "mycluster"); err != nil {
+		t.Fatalf("unexpected error with no snapshots: %v", err)
+	}
+
+	srv.mu.Lock()
+	deletedCount := len(srv.deletedSnapshots)
+	getCount := srv.snapshotGetCount
+	srv.mu.Unlock()
+
+	if deletedCount != 0 {
+		t.Errorf("expected no DELETE calls, got %d: %v", deletedCount, srv.deletedSnapshots)
+	}
+	if getCount != 1 {
+		t.Errorf("expected exactly 1 GET call (no verification), got %d", getCount)
+	}
+}

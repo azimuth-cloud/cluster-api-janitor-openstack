@@ -41,6 +41,7 @@ templated manifests should match snapshot:
           - get
           - watch
           - patch
+          - update
       - apiGroups:
           - apiextensions.k8s.io
         resources:
@@ -97,9 +98,23 @@ templated manifests should match snapshot:
             - env:
                 - name: CAPI_JANITOR_DEFAULT_VOLUMES_POLICY
                   value: delete
+                - name: CAPI_JANITOR_RETRY_DEFAULT_DELAY
+                  value: "60"
               image: ghcr.io/azimuth-cloud/cluster-api-janitor-openstack:main
               imagePullPolicy: IfNotPresent
+              livenessProbe:
+                httpGet:
+                  path: /healthz
+                  port: 8081
+                initialDelaySeconds: 15
+                periodSeconds: 20
               name: operator
+              readinessProbe:
+                httpGet:
+                  path: /readyz
+                  port: 8081
+                initialDelaySeconds: 5
+                periodSeconds: 10
               resources: {}
               securityContext:
                 allowPrivilegeEscalation: false

@@ -23,7 +23,7 @@ on:
 
 jobs:
   build_push_images:
-    name: Build and push images
+    name: Build and push images (Nix)
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -36,6 +36,9 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
 
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@07ebb8d2749aa2fac2baae7d1cfa011e4acfd8d1 # v5
+
       - name: Login to GitHub Container Registry
         uses: docker/login-action@b45d80f862d83dbcd57f89517bcf500b2ab88fb2 # v4.0.0
         with:
@@ -47,27 +50,63 @@ jobs:
         id: semver
         uses: azimuth-cloud/github-actions/semver@master
 
-      - name: Calculate metadata for image
-        id: image-meta
-        uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf # v6.0.0
-        with:
-          images: ghcr.io/azimuth-cloud/cluster-api-janitor-openstack
-          # Produce the branch name or tag and the SHA as tags
-          tags: |
-            type=ref,event=branch
-            type=ref,event=tag
-            type=raw,value=${{ steps.semver.outputs.short-sha }}
+      - name: Compute image tags
+        id: tags
+        run: |
+          # All final tags for the manifest list (space-separated)
+          TAGS=""
+          REF="${{ github.ref }}"
+          SHA="${{ steps.semver.outputs.short-sha }}"
+          IMAGE="ghcr.io/azimuth-cloud/cluster-api-janitor-openstack"
+          if [[ "$REF" == refs/tags/* ]]; then
+            TAG="${REF#refs/tags/}"
+            TAGS="$IMAGE:$TAG $IMAGE:$SHA"
+          elif [[ "$REF" == refs/heads/* ]]; then
+            BRANCH="${REF#refs/heads/}"
+            TAGS="$IMAGE:$BRANCH $IMAGE:$SHA"
+          else
+            TAGS="$IMAGE:$SHA"
+          fi
+          echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
+          echo "sha_tag=$IMAGE:$SHA" >> "$GITHUB_OUTPUT"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
 
-      - name: Build and push image
-        uses: azimuth-cloud/github-actions/docker-multiarch-build-push@master
+      - name: Build amd64 image
+        run: nix-build nix -A image -o image-amd64.tar.gz
+
+      - name: Build arm64 image (cross-compiled)
+        run: nix-build nix -A image-arm64 -o image-arm64.tar.gz
+
+      - name: Push arch-specific images and create manifest list
+        env:
+          SHA_TAG: ${{ steps.tags.outputs.sha_tag }}
+          IMAGE:   ${{ steps.tags.outputs.image }}
+          TAGS:    ${{ steps.tags.outputs.tags }}
+        run: |
+          # Push each arch image under a unique tag used only to assemble the manifest.
+          skopeo copy \
+            docker-archive:image-amd64.tar.gz \
+            "docker://${SHA_TAG}-amd64"
+          skopeo copy \
+            docker-archive:image-arm64.tar.gz \
+            "docker://${SHA_TAG}-arm64"
+
+          # For each final tag, create and push a multi-arch manifest list.
+          for TAG in $TAGS; do
+            docker manifest create "$TAG" \
+              --amend "${SHA_TAG}-amd64" \
+              --amend "${SHA_TAG}-arm64"
+            docker manifest push "$TAG"
+          done
+
+      - name: Generate SBOM (CycloneDX)
+        run: nix-build nix -A sbom -o sbom.cdx.json
+
+      - name: Upload SBOM as artifact
+        uses: actions/upload-artifact@v4
         with:
-          cache-key: cluster-api-janitor-openstack
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.image-meta.outputs.tags }}
-          labels: ${{ steps.image-meta.outputs.labels }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+          name: sbom-${{ steps.semver.outputs.short-sha }}
+          path: sbom.cdx.json
 
   build_push_chart:
     name: Build and push Helm chart
