@@ -10,7 +10,7 @@ let
     env.CGO_ENABLED = "0";
     ldflags = [ "-s" "-w" ];
     # Run `nix-build nix -A manager` once; it will fail and print the real hash.
-    vendorHash = "sha256-5p5z+fzRkBk6rIb3DWwA3jsF4MdMVAwKHz7xza09fCc=";
+    vendorHash = "sha256-hRrr9kZCOpJJqPEjw45eE9YT+C1VOVGRx6HmAN3qYhQ=";
     postInstall = ''
       mv $out/bin/cmd $out/bin/manager
     '';
