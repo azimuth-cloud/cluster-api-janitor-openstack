@@ -48,8 +48,8 @@ let
   } ''
     export HOME=$TMPDIR
     syft scan ${manager}/bin/manager \
-      --output cyclonedx-json \
-      --file $out
+      --output cyclonedx-json=$out \
+      --quiet
   '';
 
   # CI check: go fmt + go vet + unit tests (native only — arm64 cross tests cannot
