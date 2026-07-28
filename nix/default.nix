@@ -46,7 +46,6 @@ let
   sbom = pkgs.runCommand "sbom.cdx.json" {
     nativeBuildInputs = [ pkgs.syft ];
   } ''
-    export HOME=$TMPDIR
     syft scan ${manager}/bin/manager \
       --output cyclonedx-json \
       --file $out
