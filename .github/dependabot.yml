@@ -1,5 +1,6 @@
 version: 2
 updates:
+updates:
   # Using dependabot for all GHA violates pinning policy
   - package-ecosystem: github-actions
     directory: "/"
@@ -18,18 +19,18 @@ updates:
       - dependency-name: "actions/*"
       - dependency-name: "github-actions/*"
 
-  # Automatically propose PRs for Go module dependencies
-  - package-ecosystem: gomod
+  # Automatically propose PRs for Python dependencies
+  - package-ecosystem: pip
     directory: "/"
     schedule:
-      # Check for new versions weekly
-      interval: weekly
+      # Check for new versions daily
+      interval: daily
     groups:
-      go-updates:
+      pip-updates:
         patterns: ["*"]
     labels:
       - automation
-      - go-update
+      - pip-update
     commit-message:
-      # Prefix all commit messages with "go: "
-      prefix: "go"
+      # Prefix all commit messages with "pip: "
+      prefix: "pip"
