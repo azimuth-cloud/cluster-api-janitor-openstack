@@ -1,4 +1,4 @@
-ruff~=0.16.8
+ruff~=0.16.9
 coverage!=4.4,>=7.16.1 # Apache-2.0
 stestr>=4.2.1 # Apache-2.0
 codespell
