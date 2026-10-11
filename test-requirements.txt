@@ -5,4 +5,4 @@ codespell
 types-PyYAML
 types-setuptools
 mypy
-black~=26.5.1
+black~=26.10.0
