@@ -16,8 +16,8 @@ httpcore==1.0.9
 httpx==0.28.1
 idna==3.20
 iso8601==2.1.0
-jsonpatch==1.39
-jsonpointer==3.7
+jsonpatch==1.43
+jsonpointer==3.9
 kopf==1.45.2
 multidict==7.2.1
 propcache==0.5.4
